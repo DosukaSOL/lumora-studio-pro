@@ -210,8 +210,17 @@ export class CatalogDatabase {
   }
 
   updateImage(id: string, data: Partial<any>): void {
-    const fields = Object.keys(data).map(k => `${k} = ?`).join(', ');
-    const values = Object.values(data);
+    const ALLOWED_COLUMNS = new Set([
+      'file_name', 'file_path', 'file_size', 'file_type', 'width', 'height',
+      'date_taken', 'camera_make', 'camera_model', 'lens', 'focal_length',
+      'aperture', 'shutter_speed', 'iso', 'gps_lat', 'gps_lng',
+      'rating', 'color_label', 'flag', 'keywords', 'caption',
+      'thumbnail_path', 'preview_path',
+    ]);
+    const safeKeys = Object.keys(data).filter(k => ALLOWED_COLUMNS.has(k));
+    if (safeKeys.length === 0) return;
+    const fields = safeKeys.map(k => `${k} = ?`).join(', ');
+    const values = safeKeys.map(k => data[k]);
     this.db.prepare(`UPDATE images SET ${fields}, date_modified = datetime('now') WHERE id = ?`).run(...values, id);
   }
 

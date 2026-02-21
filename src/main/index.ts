@@ -62,10 +62,25 @@ function createMainWindow(): void {
     mainWindow = null;
   });
 
-  // Handle external links
+  // Handle external links — only allow https URLs
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        shell.openExternal(url);
+      }
+    } catch {
+      // Ignore malformed URLs
+    }
     return { action: 'deny' };
+  });
+
+  // Block navigation away from the app
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const appOrigins = ['http://localhost:5173', 'file://'];
+    if (!appOrigins.some(origin => url.startsWith(origin))) {
+      event.preventDefault();
+    }
   });
 }
 

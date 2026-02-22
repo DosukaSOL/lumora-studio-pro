@@ -5,7 +5,7 @@
  * Supports selection, ratings, and color labels.
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { useAppStore, CatalogImage } from '../stores/appStore';
 
 /** Star rating display */
@@ -40,33 +40,78 @@ const GridThumbnail: React.FC<{
   onDoubleClick: (id: string) => void;
   size: number;
 }> = ({ image, isSelected, onSelect, onDoubleClick, size }) => {
+  const [thumbSrc, setThumbSrc] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadThumb = async () => {
+      if (!window.electronAPI) {
+        console.warn('[GridThumb] No electronAPI available');
+        return;
+      }
+
+      // If we have a cached thumbnail, read it directly as base64
+      if (image.thumbnail_path) {
+        console.log(`[GridThumb] Trying readFileAsBase64 for: ${image.thumbnail_path}`);
+        try {
+          const b64 = await window.electronAPI.readFileAsBase64(image.thumbnail_path);
+          console.log(`[GridThumb] readFileAsBase64 result: ${b64 ? `${b64.length} chars` : 'EMPTY'}`);
+          if (!cancelled && b64) { setThumbSrc(b64); return; }
+        } catch (e) {
+          console.warn('[GridThumb] readFileAsBase64 error:', e);
+        }
+      } else {
+        console.log(`[GridThumb] No thumbnail_path for ${image.file_name}`);
+      }
+
+      // Generate thumbnail on-the-fly via IPC
+      if (image.file_path) {
+        console.log(`[GridThumb] Trying thumbnailBase64 for: ${image.file_name}`);
+        try {
+          const b64 = await window.electronAPI.thumbnailBase64(image.file_path, 300);
+          console.log(`[GridThumb] thumbnailBase64 result: ${b64 ? `${b64.length} chars` : 'EMPTY'}`);
+          if (!cancelled && b64) { setThumbSrc(b64); return; }
+        } catch (e) {
+          console.warn('[GridThumb] thumbnailBase64 error:', e);
+        }
+      }
+
+      // Fallback: SVG placeholder
+      console.warn(`[GridThumb] ALL methods failed for ${image.file_name}, using SVG placeholder`);
+      if (!cancelled) {
+        setThumbSrc(`data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect fill="%23333" width="${size}" height="${size}"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23666" font-size="14">${image.file_name.substring(0, 8)}</text></svg>`)}`);
+      }
+    };
+
+    loadThumb();
+    return () => { cancelled = true; };
+  }, [image.thumbnail_path, image.file_path, image.file_name, size]);
+
   const handleRate = useCallback((rating: number) => {
     useAppStore.getState().updateImage(image.id, { rating } as any);
-    // Also update via IPC if available
     window.electronAPI?.catalogUpdate(image.id, { rating });
   }, [image.id]);
 
-  // Use file path or generate a placeholder
-  const imgSrc = image.thumbnail_path
-    ? `file://${image.thumbnail_path}`
-    : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect fill="%23333" width="${size}" height="${size}"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23666" font-size="14">${image.file_name.substring(0, 8)}</text></svg>`)}`;
-
   return (
     <div
-      className={`grid-thumb ${isSelected ? 'selected' : ''}`}
+      className={`grid-thumb group ${isSelected ? 'selected' : ''}`}
       style={{ width: size, height: size }}
       onClick={(e) => onSelect(image.id, e.metaKey || e.ctrlKey)}
       onDoubleClick={() => onDoubleClick(image.id)}
     >
-      <img
-        src={imgSrc}
-        alt={image.file_name}
-        className="w-full h-full object-cover"
-        loading="lazy"
-        onError={(e) => {
-          (e.target as HTMLImageElement).src = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect fill="%23282828" width="${size}" height="${size}"/><text x="50%" y="45%" text-anchor="middle" dy=".3em" fill="%23555" font-size="12" font-family="sans-serif">${image.file_type?.toUpperCase() || 'IMG'}</text><text x="50%" y="60%" text-anchor="middle" dy=".3em" fill="%23444" font-size="9" font-family="sans-serif">${image.file_name.substring(0, 12)}</text></svg>`)}`;
-        }}
-      />
+      {thumbSrc ? (
+        <img
+          src={thumbSrc}
+          alt={image.file_name}
+          className="w-full h-full object-cover"
+          onError={() => console.warn(`[GridThumb] Image render error for ${image.file_name}`)}
+        />
+      ) : (
+        <div className="w-full h-full bg-surface-800 flex items-center justify-center">
+          <div className="w-5 h-5 border-2 border-surface-600 border-t-lumora-500 rounded-full animate-spin" />
+        </div>
+      )}
 
       {/* Overlay — shown on hover */}
       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />

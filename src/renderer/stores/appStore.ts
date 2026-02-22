@@ -29,6 +29,8 @@ export interface CatalogImage {
   aperture: number | null;
   shutter_speed: string | null;
   iso: number | null;
+  gps_lat: number | null;
+  gps_lng: number | null;
   rating: number;
   color_label: string;
   flag: string;

@@ -44,6 +44,22 @@ const App: React.FC<AppProps> = ({ onReady }) => {
     return () => clearTimeout(timer);
   }, [onReady]);
 
+  // Load existing catalog images on startup
+  useEffect(() => {
+    const loadCatalog = async () => {
+      if (!window.electronAPI) return;
+      try {
+        const allImages = await window.electronAPI.catalogGetAll();
+        if (allImages && allImages.length > 0) {
+          useAppStore.getState().setImages(allImages);
+        }
+      } catch (err) {
+        console.error('Failed to load catalog:', err);
+      }
+    };
+    loadCatalog();
+  }, []);
+
   // Listen for menu actions from Electron
   useEffect(() => {
     if (!window.electronAPI) return;

@@ -13,6 +13,16 @@ import { ImageProcessor } from './image-processor';
 
 const imageProcessor = new ImageProcessor();
 
+/** Validate that a file path is safe (not accessing system files) */
+function isAllowedPath(filePath: string): boolean {
+  const resolved = path.resolve(filePath);
+  const home = app.getPath('home');
+  const userData = app.getPath('userData');
+  const temp = app.getPath('temp');
+  // Allow paths under home, userData, or temp directories
+  return resolved.startsWith(home) || resolved.startsWith(userData) || resolved.startsWith(temp) || resolved.startsWith('/Volumes/');
+}
+
 export function setupIpcHandlers(db: CatalogDatabase): void {
 
   // ─── File Dialog Operations ───────────────────────────────────
@@ -51,11 +61,13 @@ export function setupIpcHandlers(db: CatalogDatabase): void {
   // ─── File Operations ──────────────────────────────────────────
 
   ipcMain.handle('file:read', async (_event, filePath: string) => {
+    if (!isAllowedPath(filePath)) throw new Error('Access denied: path not allowed');
     const data = await fs.readFile(filePath);
     return data;
   });
 
   ipcMain.handle('file:write', async (_event, filePath: string, data: Buffer | string) => {
+    if (!isAllowedPath(filePath)) throw new Error('Access denied: path not allowed');
     await fs.writeFile(filePath, data);
     return true;
   });
@@ -88,14 +100,39 @@ export function setupIpcHandlers(db: CatalogDatabase): void {
     return await imageProcessor.getImageInfo(filePath);
   });
 
+  ipcMain.handle('image:loadBase64', async (_event, filePath: string, maxSize?: number) => {
+    console.log(`[IPC] image:loadBase64 called for ${path.basename(filePath)} maxSize=${maxSize || 2048}`);
+    const result = await imageProcessor.loadImageAsBase64(filePath, maxSize || 2048);
+    console.log(`[IPC] image:loadBase64 returning ${result ? `${result.length} chars` : 'EMPTY'} for ${path.basename(filePath)}`);
+    return result;
+  });
+
+  ipcMain.handle('image:thumbnailBase64', async (_event, filePath: string, size?: number) => {
+    console.log(`[IPC] image:thumbnailBase64 called for ${path.basename(filePath)} size=${size || 300}`);
+    const result = await imageProcessor.loadImageAsBase64(filePath, size || 300);
+    console.log(`[IPC] image:thumbnailBase64 returning ${result ? `${result.length} chars` : 'EMPTY'} for ${path.basename(filePath)}`);
+    return result;
+  });
+
+  ipcMain.handle('image:readFileBase64', async (_event, filePath: string) => {
+    console.log(`[IPC] image:readFileBase64 called for ${path.basename(filePath)}`);
+    const result = await imageProcessor.readFileAsBase64(filePath);
+    console.log(`[IPC] image:readFileBase64 returning ${result ? `${result.length} chars` : 'EMPTY'} for ${path.basename(filePath)}`);
+    return result;
+  });
+
   // ─── Catalog Operations ────────────────────────────────────────
 
   ipcMain.handle('catalog:import', async (_event, filePaths: string[]) => {
+    console.log(`[Import] Starting batch import of ${filePaths.length} files`);
     const imported: string[] = [];
     for (const filePath of filePaths) {
       try {
+        console.log(`[Import] Processing: ${path.basename(filePath)}`);
         const info = await imageProcessor.getImageInfo(filePath);
+        console.log(`[Import] Info: ${info.width}x${info.height} ${info.format}`);
         const thumbnail = await imageProcessor.generateThumbnail(filePath, 300);
+        console.log(`[Import] Thumbnail: ${thumbnail ? 'OK' : 'FAILED'}`);
         
         const id = db.importImage({
           filePath,
@@ -118,17 +155,22 @@ export function setupIpcHandlers(db: CatalogDatabase): void {
           previewPath: thumbnail,
         });
         imported.push(id);
+        console.log(`[Import] Successfully imported: ${path.basename(filePath)} => ${id}`);
       } catch (err) {
-        console.error(`Failed to import ${filePath}:`, err);
+        console.error(`[Import] Failed to import ${filePath}:`, err);
       }
     }
+    console.log(`[Import] Batch complete: ${imported.length}/${filePaths.length} imported`);
     return imported;
   });
 
   ipcMain.handle('catalog:importSingle', async (_event, filePath: string, _options?: any) => {
     try {
+      console.log(`[ImportSingle] Processing: ${path.basename(filePath)}`);
       const info = await imageProcessor.getImageInfo(filePath);
+      console.log(`[ImportSingle] Info: ${info.width}x${info.height} ${info.format}`);
       const thumbnail = await imageProcessor.generateThumbnail(filePath, 300);
+      console.log(`[ImportSingle] Thumbnail: ${thumbnail ? 'OK' : 'FAILED'}`);
       const id = db.importImage({
         filePath,
         fileName: path.basename(filePath),
@@ -149,9 +191,11 @@ export function setupIpcHandlers(db: CatalogDatabase): void {
         thumbnailPath: thumbnail,
         previewPath: thumbnail,
       });
-      return db.getImageById(id);
+      const result = db.getImageById(id);
+      console.log(`[ImportSingle] Success: ${path.basename(filePath)} => ${id}`);
+      return result;
     } catch (err) {
-      console.error(`Failed to import ${filePath}:`, err);
+      console.error(`[ImportSingle] Failed to import ${filePath}:`, err);
       return null;
     }
   });

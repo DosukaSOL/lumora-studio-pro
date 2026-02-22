@@ -18,6 +18,14 @@ export class WebGLImageRenderer {
   private imageWidth: number = 0;
   private imageHeight: number = 0;
 
+  // ─── Mask compositing infrastructure ──────────────
+  private vertexBuffer: WebGLBuffer | null = null;
+  private blendProgram: WebGLProgram | null = null;
+  private drawProgram: WebGLProgram | null = null;
+  private fboPool: Array<{ fbo: WebGLFramebuffer; tex: WebGLTexture }> = [];
+  private fboWidth = 0;
+  private fboHeight = 0;
+
   /** Vertex shader — passes through coordinates */
   private static VERTEX_SHADER = `
     attribute vec2 a_position;
@@ -333,9 +341,34 @@ export class WebGLImageRenderer {
     }
   `;
 
+  /** Fragment shader — blends two renders via a mask alpha texture */
+  private static BLEND_FRAGMENT_SHADER = `
+    precision highp float;
+    varying vec2 v_texCoord;
+    uniform sampler2D u_base;
+    uniform sampler2D u_layer;
+    uniform sampler2D u_mask;
+    void main() {
+      vec4 base  = texture2D(u_base,  v_texCoord);
+      vec4 layer = texture2D(u_layer, v_texCoord);
+      float alpha = texture2D(u_mask, v_texCoord).r;
+      gl_FragColor = mix(base, layer, alpha);
+    }
+  `;
+
+  /** Fragment shader — draws a single texture to screen */
+  private static DRAW_FRAGMENT_SHADER = `
+    precision highp float;
+    varying vec2 v_texCoord;
+    uniform sampler2D u_texture;
+    void main() {
+      gl_FragColor = texture2D(u_texture, v_texCoord);
+    }
+  `;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    this.gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true }) || canvas.getContext('webgl', { preserveDrawingBuffer: true });
 
     if (!this.gl) {
       throw new Error('WebGL not supported');
@@ -396,6 +429,7 @@ export class WebGLImageRenderer {
     ]);
 
     const buffer = gl.createBuffer();
+    this.vertexBuffer = buffer;
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 
@@ -507,16 +541,25 @@ export class WebGLImageRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
   }
 
-  /** Render the image with current edit parameters */
+  /** Render the image with current edit parameters to screen */
   render(edits: any): void {
     const gl = this.gl!;
     if (!this.program || !this.imageLoaded) return;
-
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    this.renderWithEdits(edits);
+  }
+
+  /** Internal: render edits to whatever framebuffer + viewport is currently bound */
+  private renderWithEdits(edits: any): void {
+    const gl = this.gl!;
+    if (!this.program || !this.imageLoaded) return;
+
     gl.clearColor(0.067, 0.067, 0.067, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     gl.useProgram(this.program);
+    this.setupAttribs(this.program);
 
     // Bind image texture
     gl.activeTexture(gl.TEXTURE0);
@@ -540,7 +583,8 @@ export class WebGLImageRenderer {
 
     // ─── Tone Curve LUT ────────────────────────────
     const curvePoints = edits.toneCurve?.points;
-    const hasCustomCurve = curvePoints && curvePoints.length > 2;
+    const hasCustomCurve = curvePoints && curvePoints.length >= 2 &&
+      curvePoints.some((p: any) => Math.abs(p.x - p.y) > 0.5);
     if (hasCustomCurve) {
       this.updateCurveLUT(curvePoints);
     }
@@ -645,12 +689,326 @@ export class WebGLImageRenderer {
     }
   }
 
+  // ═══════════════════════════════════════════════════
+  // Mask compositing — multi-pass FBO pipeline
+  // ═══════════════════════════════════════════════════
+
+  /** Bind vertex buffer & attributes for any shader program */
+  private setupAttribs(program: WebGLProgram): void {
+    const gl = this.gl!;
+    if (!this.vertexBuffer) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+
+    const posLoc = gl.getAttribLocation(program, 'a_position');
+    if (posLoc >= 0) {
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
+    }
+    const texLoc = gl.getAttribLocation(program, 'a_texCoord');
+    if (texLoc >= 0) {
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 16, 8);
+    }
+  }
+
+  /** Lazily compile the blend program */
+  private ensureBlendProgram(): void {
+    if (this.blendProgram) return;
+    const gl = this.gl!;
+    const vs = this.compileShader(gl.VERTEX_SHADER, WebGLImageRenderer.VERTEX_SHADER);
+    const fs = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.BLEND_FRAGMENT_SHADER);
+    if (!vs || !fs) return;
+    this.blendProgram = gl.createProgram()!;
+    gl.attachShader(this.blendProgram, vs);
+    gl.attachShader(this.blendProgram, fs);
+    gl.linkProgram(this.blendProgram);
+    if (!gl.getProgramParameter(this.blendProgram, gl.LINK_STATUS)) {
+      console.error('Blend shader link error:', gl.getProgramInfoLog(this.blendProgram));
+      this.blendProgram = null;
+    }
+  }
+
+  /** Lazily compile the draw-texture program */
+  private ensureDrawProgram(): void {
+    if (this.drawProgram) return;
+    const gl = this.gl!;
+    const vs = this.compileShader(gl.VERTEX_SHADER, WebGLImageRenderer.VERTEX_SHADER);
+    const fs = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.DRAW_FRAGMENT_SHADER);
+    if (!vs || !fs) return;
+    this.drawProgram = gl.createProgram()!;
+    gl.attachShader(this.drawProgram, vs);
+    gl.attachShader(this.drawProgram, fs);
+    gl.linkProgram(this.drawProgram);
+    if (!gl.getProgramParameter(this.drawProgram, gl.LINK_STATUS)) {
+      console.error('Draw shader link error:', gl.getProgramInfoLog(this.drawProgram));
+      this.drawProgram = null;
+    }
+  }
+
+  /** Create one framebuffer object with its colour-attachment texture */
+  private createFBO(w: number, h: number): { fbo: WebGLFramebuffer; tex: WebGLTexture } {
+    const gl = this.gl!;
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    const fbo = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    return { fbo, tex };
+  }
+
+  /** Ensure we have 3 FBOs at the current canvas dimensions */
+  private ensureFBOs(): void {
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    if (w === this.fboWidth && h === this.fboHeight && this.fboPool.length === 3) return;
+
+    this.destroyFBOs();
+    this.fboWidth = w;
+    this.fboHeight = h;
+    for (let i = 0; i < 3; i++) {
+      this.fboPool.push(this.createFBO(w, h));
+    }
+  }
+
+  /** Upload a canvas (mask alpha) as a WebGL texture */
+  private createTextureFromCanvas(canvas: HTMLCanvasElement): WebGLTexture {
+    const gl = this.gl!;
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  /** Blend pass: mix(base, layer, maskAlpha) → currently bound FBO */
+  private blendPass(baseTex: WebGLTexture, layerTex: WebGLTexture, maskTex: WebGLTexture): void {
+    const gl = this.gl!;
+    if (!this.blendProgram) return;
+
+    gl.useProgram(this.blendProgram);
+    this.setupAttribs(this.blendProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, baseTex);
+    gl.uniform1i(gl.getUniformLocation(this.blendProgram, 'u_base'), 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, layerTex);
+    gl.uniform1i(gl.getUniformLocation(this.blendProgram, 'u_layer'), 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, maskTex);
+    gl.uniform1i(gl.getUniformLocation(this.blendProgram, 'u_mask'), 2);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  /** Draw a texture fullscreen to the currently bound target */
+  private drawTexture(tex: WebGLTexture): void {
+    const gl = this.gl!;
+    if (!this.drawProgram) return;
+
+    gl.useProgram(this.drawProgram);
+    this.setupAttribs(this.drawProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(this.drawProgram, 'u_texture'), 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  /** Create combined edits (global + mask adjustment deltas) */
+  private combineEdits(global: any, maskAdj: any): any {
+    const combined = JSON.parse(JSON.stringify(global));
+    const add = (key: string) => {
+      if (maskAdj[key]) combined[key] = (combined[key] || 0) + maskAdj[key];
+    };
+    add('exposure'); add('contrast'); add('highlights'); add('shadows');
+    add('whites'); add('blacks'); add('temperature'); add('tint');
+    add('clarity'); add('dehaze'); add('saturation');
+
+    // Mask sharpness → global sharpening.amount
+    if (maskAdj.sharpness) {
+      if (!combined.sharpening) combined.sharpening = {};
+      combined.sharpening.amount = (combined.sharpening?.amount || 0) + maskAdj.sharpness;
+    }
+    return combined;
+  }
+
+  /**
+   * Render the image with global edits PLUS per-mask local adjustments.
+   *
+   * Pipeline (multi-pass FBO ping-pong):
+   *   1. Render base (global edits) → FBO-A
+   *   2. For each mask:
+   *      a. Render image with (global + mask) edits → FBO-maskLayer
+   *      b. Blend FBO-src ← mix(FBO-src, FBO-maskLayer, maskAlpha) → FBO-dst
+   *      c. Swap src/dst
+   *   3. Draw FBO-src → screen
+   */
+  renderWithMasks(
+    edits: any,
+    masks: Array<{ adjustments: any; enabled: boolean }>,
+    maskCanvases: HTMLCanvasElement[],
+  ): void {
+    const gl = this.gl!;
+    if (!this.program || !this.imageLoaded) return;
+
+    // Fast path: no enabled masks
+    const enabledIdxs: number[] = [];
+    masks.forEach((m, i) => { if (m.enabled && maskCanvases[i]) enabledIdxs.push(i); });
+    if (enabledIdxs.length === 0) {
+      this.render(edits);
+      return;
+    }
+
+    // Lazy-init compositing infrastructure
+    this.ensureFBOs();
+    this.ensureBlendProgram();
+    this.ensureDrawProgram();
+    if (!this.blendProgram || !this.drawProgram || this.fboPool.length < 3) {
+      // Fallback: render without masks
+      this.render(edits);
+      return;
+    }
+
+    const w = this.fboWidth;
+    const h = this.fboHeight;
+
+    // FBO roles: [0] and [1] for ping-pong accumulation, [2] for per-mask layer
+    const accumA = this.fboPool[0];
+    const accumB = this.fboPool[1];
+    const maskLayer = this.fboPool[2];
+
+    // Step 1: Render base (global edits) → accumA
+    gl.bindFramebuffer(gl.FRAMEBUFFER, accumA.fbo);
+    gl.viewport(0, 0, w, h);
+    this.renderWithEdits(edits);
+
+    // Step 2: For each enabled mask
+    let src = accumA;
+    let dst = accumB;
+
+    for (const idx of enabledIdxs) {
+      const mask = masks[idx];
+      const maskCanvas = maskCanvases[idx];
+
+      // 2a. Render with combined edits → maskLayer
+      const combined = this.combineEdits(edits, mask.adjustments);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, maskLayer.fbo);
+      gl.viewport(0, 0, w, h);
+      this.renderWithEdits(combined);
+
+      // 2b. Upload mask alpha canvas
+      const maskTex = this.createTextureFromCanvas(maskCanvas);
+
+      // 2c. Blend: dst = mix(src, maskLayer, maskAlpha)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+      gl.viewport(0, 0, w, h);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.blendPass(src.tex, maskLayer.tex, maskTex);
+
+      gl.deleteTexture(maskTex);
+
+      // 2d. Swap ping-pong
+      const tmp = src;
+      src = dst;
+      dst = tmp;
+    }
+
+    // Step 3: Draw accumulated result → screen
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.drawTexture(src.tex);
+  }
+
+  /** Release FBO resources */
+  private destroyFBOs(): void {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const { fbo, tex } of this.fboPool) {
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(tex);
+    }
+    this.fboPool = [];
+    this.fboWidth = 0;
+    this.fboHeight = 0;
+  }
+
+  /** Get the canvas element (for export pixel capture) */
+  getCanvas(): HTMLCanvasElement { return this.canvas; }
+
+  /** Check if the renderer has a loaded image */
+  isReady(): boolean { return this.imageLoaded && !!this.program; }
+
+  /** Export the current canvas as a data URL (must call render first) */
+  toDataURL(format: string = 'image/png', quality: number = 1.0): string {
+    return this.canvas.toDataURL(format, quality);
+  }
+
+  /** Export canvas pixels as Blob */
+  toBlob(format: string = 'image/png', quality: number = 1.0): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      this.canvas.toBlob(
+        (blob) => blob ? resolve(blob) : reject(new Error('toBlob failed')),
+        format,
+        quality,
+      );
+    });
+  }
+
+  /** Render to an offscreen canvas at a given resolution and return as data URL */
+  renderForExport(
+    edits: any,
+    width: number,
+    height: number,
+    format: string = 'image/png',
+    quality: number = 1.0,
+  ): string {
+    // Save current canvas dimensions
+    const origW = this.canvas.width;
+    const origH = this.canvas.height;
+
+    // Resize canvas to export resolution
+    this.canvas.width = width;
+    this.canvas.height = height;
+
+    // Render
+    this.render(edits);
+
+    // Capture
+    const dataUrl = this.canvas.toDataURL(format, quality);
+
+    // Restore original dimensions
+    this.canvas.width = origW;
+    this.canvas.height = origH;
+    this.render(edits);
+
+    return dataUrl;
+  }
+
   /** Clean up WebGL resources */
   destroy(): void {
     const gl = this.gl;
     if (!gl) return;
+    this.destroyFBOs();
     if (this.texture) gl.deleteTexture(this.texture);
     if (this.curveTexture) gl.deleteTexture(this.curveTexture);
     if (this.program) gl.deleteProgram(this.program);
+    if (this.blendProgram) gl.deleteProgram(this.blendProgram);
+    if (this.drawProgram) gl.deleteProgram(this.drawProgram);
   }
 }

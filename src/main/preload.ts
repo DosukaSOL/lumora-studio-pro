@@ -41,6 +41,15 @@ const electronAPI = {
   getImageInfo: (filePath: string) =>
     ipcRenderer.invoke('image:info', filePath),
 
+  loadImageBase64: (filePath: string, maxSize?: number) =>
+    ipcRenderer.invoke('image:loadBase64', filePath, maxSize),
+
+  thumbnailBase64: (filePath: string, size?: number) =>
+    ipcRenderer.invoke('image:thumbnailBase64', filePath, size),
+
+  readFileAsBase64: (filePath: string) =>
+    ipcRenderer.invoke('image:readFileBase64', filePath),
+
   // ─── Catalog Operations ─────────────────────────────────────
   importImage: (filePath: string, options?: any) =>
     ipcRenderer.invoke('catalog:importSingle', filePath, options),

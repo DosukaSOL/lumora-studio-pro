@@ -177,7 +177,7 @@
 
   /* Grid thumbnail */
   .grid-thumb {
-    @apply relative rounded-lg overflow-hidden cursor-pointer group
+    @apply relative rounded-lg overflow-hidden cursor-pointer
            border-2 border-transparent hover:border-surface-500/50 transition-all duration-200;
   }
 

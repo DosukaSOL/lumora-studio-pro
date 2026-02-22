@@ -12,6 +12,9 @@ interface Window {
     generateThumbnail: (filePath: string, size: number) => Promise<string>;
     exportImage: (options: any) => Promise<string>;
     getImageInfo: (filePath: string) => Promise<any>;
+    loadImageBase64: (filePath: string, maxSize?: number) => Promise<string>;
+    thumbnailBase64: (filePath: string, size?: number) => Promise<string>;
+    readFileAsBase64: (filePath: string) => Promise<string>;
     importImage: (filePath: string, options?: any) => Promise<any>;
     scanFolder: (folderPath: string) => Promise<string[]>;
     catalogImport: (filePaths: string[]) => Promise<string[]>;

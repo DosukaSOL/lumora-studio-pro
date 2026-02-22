@@ -48,17 +48,26 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
     setIsEnhancing(true);
 
     try {
+      // Load image as base64 via IPC for reliable format support
+      let dataUri = '';
+      if (window.electronAPI) {
+        try {
+          dataUri = await window.electronAPI.loadImageBase64(activeImage.file_path, 1024);
+        } catch {}
+      }
+
+      if (!dataUri) {
+        setIsEnhancing(false);
+        return;
+      }
+
       const img = new Image();
       img.crossOrigin = 'anonymous';
       
       await new Promise<void>((resolve, reject) => {
         img.onload = () => resolve();
         img.onerror = reject;
-        img.src = activeImage.file_path
-          ? `file://${activeImage.file_path}`
-          : activeImage.preview_path
-          ? `file://${activeImage.preview_path}`
-          : '';
+        img.src = dataUri;
       });
 
       const enhancements = autoEnhanceFromImage(img);

@@ -15,6 +15,36 @@ import { BUILT_IN_PRESETS, getPresetsByCategory, Preset } from '../utils/presets
 const NavigatorPreview: React.FC = () => {
   const { activeImageId, images, zoomLevel } = useAppStore();
   const activeImage = images.find((img) => img.id === activeImageId);
+  const [previewSrc, setPreviewSrc] = useState('');
+
+  useEffect(() => {
+    if (!activeImage) { setPreviewSrc(''); return; }
+    let cancelled = false;
+
+    const load = async () => {
+      if (!window.electronAPI) return;
+
+      // If we have a cached thumbnail, read it directly
+      if (activeImage.thumbnail_path) {
+        try {
+          const b64 = await window.electronAPI.readFileAsBase64(activeImage.thumbnail_path);
+          if (!cancelled && b64) { setPreviewSrc(b64); return; }
+        } catch {}
+      }
+
+      // Generate on-the-fly via IPC
+      if (activeImage.file_path) {
+        try {
+          const b64 = await window.electronAPI.thumbnailBase64(activeImage.file_path, 300);
+          if (!cancelled && b64) { setPreviewSrc(b64); return; }
+        } catch {}
+      }
+
+      if (!cancelled) setPreviewSrc('');
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [activeImage?.id, activeImage?.thumbnail_path, activeImage?.file_path]);
 
   if (!activeImage) {
     return (
@@ -24,16 +54,14 @@ const NavigatorPreview: React.FC = () => {
     );
   }
 
-  const imgSrc = activeImage.thumbnail_path
-    ? `file://${activeImage.thumbnail_path}`
-    : activeImage.preview_path
-    ? `file://${activeImage.preview_path}`
-    : '';
-
   return (
     <div className="h-36 bg-surface-900/50 relative overflow-hidden group">
-      {imgSrc ? (
-        <img src={imgSrc} alt="" className="w-full h-full object-contain" />
+      {previewSrc ? (
+        <img
+          src={previewSrc}
+          alt=""
+          className="w-full h-full object-contain"
+        />
       ) : (
         <div className="w-full h-full flex items-center justify-center">
           <span className="text-2xs text-surface-500">{activeImage.file_name}</span>

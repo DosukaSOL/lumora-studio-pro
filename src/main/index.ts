@@ -6,7 +6,7 @@
  * and bridges between the renderer and system-level operations.
  */
 
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme, protocol, net } from 'electron';
 import path from 'path';
 import { setupIpcHandlers } from './ipc-handlers';
 import { createApplicationMenu } from './menu';
@@ -17,6 +17,20 @@ let mainWindow: BrowserWindow | null = null;
 let catalogDb: CatalogDatabase | null = null;
 
 const isDev = !app.isPackaged;
+
+// Register custom protocol for serving local files
+// Must be called before app.ready
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'localfile',
+    privileges: {
+      bypassCSP: true,
+      stream: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 /**
  * Create the main application window
@@ -38,6 +52,7 @@ function createMainWindow(): void {
       sandbox: false,
       webgl: true,
       backgroundThrottling: false,
+      webSecurity: !isDev, // Allow file:// access in dev mode
     },
     show: false,
     icon: path.join(__dirname, '../../resources/icon.png'),
@@ -88,6 +103,23 @@ function createMainWindow(): void {
  * Application initialization
  */
 app.whenReady().then(async () => {
+  // Register custom protocol handler for serving local files
+  // Only allows access to files under user's home directory for security
+  protocol.handle('localfile', (request) => {
+    try {
+      const filePath = decodeURIComponent(request.url.replace('localfile://', ''));
+      const resolved = path.resolve(filePath);
+      const home = app.getPath('home');
+      if (!resolved.startsWith(home) && !resolved.startsWith('/Volumes/')) {
+        return new Response('Access denied', { status: 403 });
+      }
+      return net.fetch(`file://${encodeURI(filePath)}`);
+    } catch (e) {
+      console.error('[Protocol] localfile handler error:', e);
+      return new Response('File not found', { status: 404 });
+    }
+  });
+
   // Initialize the catalog database
   const dbPath = path.join(app.getPath('userData'), 'lumora-catalog.db');
   catalogDb = new CatalogDatabase(dbPath);

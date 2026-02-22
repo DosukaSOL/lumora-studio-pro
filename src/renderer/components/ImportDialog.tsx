@@ -5,7 +5,7 @@
  * Supports file selection, folder import, and progress tracking.
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 
 interface ImportDialogProps {
@@ -20,6 +20,52 @@ interface ImportOptions {
   selectedFiles: string[];
   previewImages: Array<{ path: string; name: string; size: number }>;
 }
+
+/** Thumbnail preview that loads via IPC (no localfile:// protocol needed) */
+const ImportPreviewThumb: React.FC<{ filePath: string; name: string }> = ({ filePath, name }) => {
+  const [src, setSrc] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setSrc('');
+
+    if (window.electronAPI) {
+      window.electronAPI.thumbnailBase64(filePath, 200).then(b64 => {
+        if (!cancelled) {
+          if (b64) setSrc(b64);
+          setLoading(false);
+        }
+      }).catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    } else {
+      setLoading(false);
+    }
+
+    return () => { cancelled = true; };
+  }, [filePath]);
+
+  return (
+    <div className="aspect-square rounded-lg bg-surface-800 border border-surface-700 overflow-hidden relative group">
+      {loading ? (
+        <div className="w-full h-full flex items-center justify-center">
+          <div className="w-4 h-4 border-2 border-surface-600 border-t-lumora-500 rounded-full animate-spin" />
+        </div>
+      ) : src ? (
+        <img src={src} alt={name} className="w-full h-full object-cover" />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center">
+          <span className="text-2xs text-surface-500 truncate px-1">{name}</span>
+        </div>
+      )}
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 p-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <span className="text-2xs text-white truncate block">{name}</span>
+      </div>
+    </div>
+  );
+};
 
 export const ImportDialog: React.FC<ImportDialogProps> = ({ onClose }) => {
   const { addImages } = useAppStore();
@@ -197,22 +243,7 @@ export const ImportDialog: React.FC<ImportDialogProps> = ({ onClose }) => {
               </div>
               <div className="grid grid-cols-4 gap-2 max-h-[240px] overflow-y-auto">
                 {options.previewImages.slice(0, 100).map((img, idx) => (
-                  <div
-                    key={idx}
-                    className="aspect-square rounded-lg bg-surface-800 border border-surface-700 overflow-hidden relative group"
-                  >
-                    <img
-                      src={`file://${img.path}`}
-                      alt={img.name}
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 p-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <span className="text-2xs text-white truncate block">{img.name}</span>
-                    </div>
-                  </div>
+                  <ImportPreviewThumb key={idx} filePath={img.path} name={img.name} />
                 ))}
               </div>
               {options.previewImages.length > 100 && (

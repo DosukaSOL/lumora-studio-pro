@@ -385,7 +385,10 @@ export class WebGLImageRenderer {
     const vertexShader = this.compileShader(gl.VERTEX_SHADER, WebGLImageRenderer.VERTEX_SHADER);
     const fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.FRAGMENT_SHADER);
 
-    if (!vertexShader || !fragmentShader) return;
+    if (!vertexShader || !fragmentShader) {
+      console.error('[WebGL] Shader compilation FAILED — renderer will not produce output');
+      return;
+    }
 
     this.program = gl.createProgram()!;
     gl.attachShader(this.program, vertexShader);
@@ -393,11 +396,13 @@ export class WebGLImageRenderer {
     gl.linkProgram(this.program);
 
     if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
-      console.error('Shader link error:', gl.getProgramInfoLog(this.program));
+      console.error('[WebGL] Shader link error:', gl.getProgramInfoLog(this.program));
+      this.program = null;
       return;
     }
 
     gl.useProgram(this.program);
+    console.log('[WebGL] Shaders compiled and linked successfully');
   }
 
   /** Compile a single shader */
@@ -408,7 +413,8 @@ export class WebGLImageRenderer {
     gl.compileShader(shader);
 
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+      const typeName = type === gl.VERTEX_SHADER ? 'VERTEX' : 'FRAGMENT';
+      console.error(`[WebGL] ${typeName} shader compile error:`, gl.getShaderInfoLog(shader));
       gl.deleteShader(shader);
       return null;
     }
@@ -456,9 +462,16 @@ export class WebGLImageRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
 
+    const glErr = gl.getError();
+    if (glErr !== gl.NO_ERROR) {
+      console.error(`[WebGL] texImage2D error: ${glErr}`);
+    }
+
     this.imageWidth = img.width;
     this.imageHeight = img.height;
     this.imageLoaded = true;
+
+    console.log(`[WebGL] Image loaded as texture: ${img.width}×${img.height}`);
 
     // Initialize curve LUT texture
     this.initCurveLUT();
@@ -543,8 +556,11 @@ export class WebGLImageRenderer {
 
   /** Render the image with current edit parameters to screen */
   render(edits: any): void {
-    const gl = this.gl!;
-    if (!this.program || !this.imageLoaded) return;
+    const gl = this.gl;
+    if (!gl) { console.warn('[WebGL] render: no GL context'); return; }
+    if (!this.program) { console.warn('[WebGL] render: no shader program'); return; }
+    if (!this.imageLoaded) { console.warn('[WebGL] render: no image loaded'); return; }
+    if (gl.isContextLost()) { console.warn('[WebGL] render: context lost'); return; }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.renderWithEdits(edits);
@@ -953,6 +969,28 @@ export class WebGLImageRenderer {
 
   /** Check if the renderer has a loaded image */
   isReady(): boolean { return this.imageLoaded && !!this.program; }
+
+  /** Check if the WebGL context is still valid (not lost) */
+  isContextValid(): boolean {
+    if (!this.gl) return false;
+    return !this.gl.isContextLost();
+  }
+
+  /** Diagnostic: check all components are ready for rendering */
+  diagnose(): { ok: boolean; issues: string[] } {
+    const issues: string[] = [];
+    if (!this.gl) issues.push('No WebGL context');
+    else if (this.gl.isContextLost()) issues.push('WebGL context lost');
+    if (!this.program) issues.push('No shader program (compilation may have failed)');
+    if (!this.texture) issues.push('No image texture');
+    if (!this.imageLoaded) issues.push('No image loaded');
+    if (!this.vertexBuffer) issues.push('No vertex buffer');
+    if (this.canvas.width === 0) issues.push('Canvas width is 0');
+    if (this.canvas.height === 0) issues.push('Canvas height is 0');
+    const glErr = this.gl?.getError?.();
+    if (glErr && glErr !== 0) issues.push(`WebGL error code: ${glErr}`);
+    return { ok: issues.length === 0, issues };
+  }
 
   /** Export the current canvas as a data URL (must call render first) */
   toDataURL(format: string = 'image/png', quality: number = 1.0): string {

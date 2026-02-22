@@ -6,8 +6,9 @@
  * interactive mask painting / gradient manipulation.
  * 
  * RENDERING STRATEGY:
- *  - WebGL canvas is the sole display element (with preserveDrawingBuffer)
- *  - Opaque dark background via clearColor when no image loaded
+ *  - WebGL canvas is the primary display element (with preserveDrawingBuffer)
+ *  - <img> fallback sits behind canvas as safety net (visible when WebGL hasn't drawn)
+ *  - Opaque dark background via clearColor covers fallback once WebGL renders
  *  - All edit adjustments applied in real-time via GPU shaders
  */
 
@@ -42,8 +43,13 @@ export const DevelopView: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<WebGLImageRenderer | null>(null);
   const loadedImageRef = useRef<HTMLImageElement | null>(null);
+  /** Ref to current edits — avoids stale closures in callbacks */
+  const editsRef = useRef(edits);
+  editsRef.current = edits;
 
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageDataUri, setImageDataUri] = useState<string>('');
+  const [webglOK, setWebglOK] = useState(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
@@ -77,10 +83,10 @@ export const DevelopView: React.FC = () => {
 
     const observer = new ResizeObserver(() => {
       sizeCanvas();
-      // Re-render after resize
+      // Re-render after resize using ref for current edits (avoids stale closure)
       if (rendererRef.current && loadedImageRef.current) {
         try {
-          rendererRef.current.render(edits);
+          rendererRef.current.render(editsRef.current);
         } catch (e) {
           console.error('[DevelopView] Render after resize failed:', e);
         }
@@ -88,7 +94,7 @@ export const DevelopView: React.FC = () => {
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [sizeCanvas, edits]);
+  }, [sizeCanvas]);
 
   // ═══════════════════════════════════════════════
   // WebGL Renderer lifecycle
@@ -99,7 +105,8 @@ export const DevelopView: React.FC = () => {
     try {
       rendererRef.current = new WebGLImageRenderer(canvasRef.current);
       activeRendererRef = rendererRef.current;
-      console.log('[DevelopView] WebGL renderer created');
+      const diag = rendererRef.current.diagnose();
+      console.log('[DevelopView] WebGL renderer created', diag.ok ? '— healthy' : `— issues: ${diag.issues.join(', ')}`);
     } catch (e) {
       console.error('[DevelopView] WebGL init FAILED:', e);
       rendererRef.current = null;
@@ -123,6 +130,8 @@ export const DevelopView: React.FC = () => {
 
     const loadImage = async () => {
       setImageLoaded(false);
+      setWebglOK(false);
+      setImageDataUri('');
       loadedImageRef.current = null;
       console.log(`[DevelopView] Loading image: ${activeFilePath}`);
 
@@ -141,6 +150,9 @@ export const DevelopView: React.FC = () => {
         console.warn('[DevelopView] No image data or cancelled');
         return;
       }
+
+      // Store data URI for <img> fallback
+      if (!cancelled) setImageDataUri(dataUri);
 
       const img = new Image();
 
@@ -163,18 +175,37 @@ export const DevelopView: React.FC = () => {
 
         console.log(`[DevelopView] Canvas dims: ${canvas.width}×${canvas.height}`);
 
+        // Ensure canvas has non-zero dimensions
+        if (canvas.width === 0 || canvas.height === 0) {
+          const container = containerRef.current;
+          if (container) {
+            canvas.width = Math.max(container.clientWidth, 1);
+            canvas.height = Math.max(container.clientHeight, 1);
+            console.log(`[DevelopView] Canvas force-sized: ${canvas.width}×${canvas.height}`);
+          }
+        }
+
         // Try WebGL rendering
         const renderer = rendererRef.current;
         if (renderer) {
           try {
             renderer.loadImage(img);
-            renderer.render(edits);
-            console.log('[DevelopView] WebGL render SUCCESS');
+            renderer.render(editsRef.current);
+            const diag = renderer.diagnose();
+            if (diag.ok) {
+              setWebglOK(true);
+              console.log('[DevelopView] WebGL render SUCCESS');
+            } else {
+              console.warn('[DevelopView] WebGL render completed with issues:', diag.issues);
+              setWebglOK(false);
+            }
           } catch (e) {
             console.error('[DevelopView] WebGL render FAILED:', e);
+            setWebglOK(false);
           }
         } else {
           console.warn('[DevelopView] No WebGL renderer available');
+          setWebglOK(false);
         }
 
         setImageLoaded(true);
@@ -185,7 +216,8 @@ export const DevelopView: React.FC = () => {
           sizeCanvas();
           if (renderer && loadedImageRef.current) {
             try {
-              renderer.render(edits);
+              renderer.render(editsRef.current);
+              setWebglOK(true);
             } catch (e) {
               console.error('[DevelopView] RAF re-render failed:', e);
             }
@@ -466,16 +498,28 @@ export const DevelopView: React.FC = () => {
           }}
         />
       )}
+      {/* ═══ FALLBACK: <img> behind canvas — visible when WebGL hasn't drawn ═══ */}
+      {imageDataUri && (
+        <img
+          src={imageDataUri}
+          alt=""
+          className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+          style={{ zIndex: 0 }}
+          draggable={false}
+        />
+      )}
       {/* ═══ PRIMARY: WebGL canvas for real-time adjustments ═══ */}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
+        style={{ zIndex: 1 }}
       />
 
       {/* Mask overlay canvas (red/blue tint) */}
       <canvas
         ref={overlayRef}
         className="absolute inset-0 w-full h-full pointer-events-none"
+        style={{ zIndex: 2 }}
       />
 
       {/* Active mask tool indicator */}
@@ -518,7 +562,7 @@ export const DevelopView: React.FC = () => {
 
       {/* Loading indicator */}
       {!imageLoaded && (
-        <div className="absolute inset-0 flex items-center justify-center bg-surface-950">
+        <div className="absolute inset-0 flex items-center justify-center bg-surface-950 z-30">
           <div className="flex flex-col items-center gap-3">
             <div className="w-8 h-8 border-2 border-lumora-500/20 border-t-lumora-500 rounded-full animate-spin" />
             <span className="text-2xs text-surface-500">Loading image...</span>

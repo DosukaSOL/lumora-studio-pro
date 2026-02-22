@@ -33,3 +33,20 @@ auth.json
 *.db-shm
 thumbnails/
 previews/
+cache/
+
+# User test images — never commit personal photos
+test-images/
+sample-images/
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.dng
+*.raf
+*.orf
+*.rw2
+*.pef
+*.heic
+*.heif
+*.raw

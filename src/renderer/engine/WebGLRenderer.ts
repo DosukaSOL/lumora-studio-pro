@@ -2,7 +2,10 @@
  * Lumora Studio Pro — WebGL Image Renderer
  * 
  * GPU-accelerated image rendering with real-time 
- * color and tone adjustments using WebGL shaders.
+ * color and tone adjustments using WebGL2 shaders.
+ * 
+ * Supports: Basic adjustments, HSL per-channel, Color Grading,
+ * Tone Curve (via LUT), Detail simulation, Effects, Calibration
  */
 
 export class WebGLImageRenderer {
@@ -10,6 +13,7 @@ export class WebGLImageRenderer {
   private gl: WebGL2RenderingContext | WebGLRenderingContext | null;
   private program: WebGLProgram | null = null;
   private texture: WebGLTexture | null = null;
+  private curveTexture: WebGLTexture | null = null;
   private imageLoaded: boolean = false;
   private imageWidth: number = 0;
   private imageHeight: number = 0;
@@ -28,11 +32,12 @@ export class WebGLImageRenderer {
 
   /** Fragment shader — applies all image adjustments */
   private static FRAGMENT_SHADER = `
-    precision mediump float;
+    precision highp float;
     varying vec2 v_texCoord;
     uniform sampler2D u_image;
+    uniform sampler2D u_curveLUT;
     
-    // Edit parameters
+    // ─── Basic ─────────────────────────────────────
     uniform float u_exposure;
     uniform float u_contrast;
     uniform float u_highlights;
@@ -46,15 +51,58 @@ export class WebGLImageRenderer {
     uniform float u_clarity;
     uniform float u_dehaze;
     uniform float u_texture;
+    
+    // ─── Vignette ──────────────────────────────────
     uniform float u_vignetteAmount;
     uniform float u_vignetteMidpoint;
-    uniform float u_grainAmount;
+    uniform float u_vignetteRoundness;
+    uniform float u_vignetteFeather;
     
-    // Convert RGB to HSL
+    // ─── Grain ─────────────────────────────────────
+    uniform float u_grainAmount;
+    uniform float u_grainSize;
+    
+    // ─── HSL (8 colors × 3 channels) ──────────────
+    // Order: red, orange, yellow, green, aqua, blue, purple, magenta
+    uniform float u_hslHue[8];
+    uniform float u_hslSat[8];
+    uniform float u_hslLum[8];
+    
+    // ─── Color Grading ─────────────────────────────
+    uniform float u_cgShadowsHue;
+    uniform float u_cgShadowsSat;
+    uniform float u_cgMidtonesHue;
+    uniform float u_cgMidtonesSat;
+    uniform float u_cgHighlightsHue;
+    uniform float u_cgHighlightsSat;
+    uniform float u_cgBlending;
+    uniform float u_cgBalance;
+    
+    // ─── Calibration ───────────────────────────────
+    uniform float u_calShadowsTint;
+    uniform float u_calRedHue;
+    uniform float u_calRedSat;
+    uniform float u_calGreenHue;
+    uniform float u_calGreenSat;
+    uniform float u_calBlueHue;
+    uniform float u_calBlueSat;
+    
+    // ─── Tone Curve control ────────────────────────
+    uniform float u_curveEnabled;
+    
+    // ─── Sharpening ────────────────────────────────
+    uniform float u_sharpenAmount;
+    uniform float u_sharpenRadius;
+    uniform vec2 u_texelSize;
+    
+    // ═══════════════════════════════════════════════
+    // Color space conversions
+    // ═══════════════════════════════════════════════
+    
     vec3 rgb2hsl(vec3 c) {
       float maxC = max(max(c.r, c.g), c.b);
       float minC = min(min(c.r, c.g), c.b);
-      float l = (maxC + minC) / 2.0;
+      float l = (maxC + minC) * 0.5;
       float s = 0.0;
       float h = 0.0;
       
@@ -70,12 +118,11 @@ export class WebGLImageRenderer {
       return vec3(h, s, l);
     }
     
-    // Convert HSL to RGB
     float hue2rgb(float p, float q, float t) {
       if (t < 0.0) t += 1.0;
       if (t > 1.0) t -= 1.0;
       if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;
-      if (t < 1.0/2.0) return q;
+      if (t < 0.5) return q;
       if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6.0;
       return p;
     }
@@ -91,77 +138,191 @@ export class WebGLImageRenderer {
       );
     }
     
-    // Luminance
     float luminance(vec3 c) {
       return dot(c, vec3(0.2126, 0.7152, 0.0722));
     }
     
-    // Pseudo-random for grain
     float rand(vec2 co) {
       return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
     }
+    
+    // ═══════════════════════════════════════════════
+    // Determine HSL color index weight (0-7)
+    // Maps hue angle to 8 color bands with soft transitions
+    // ═══════════════════════════════════════════════
+    float getColorWeight(float hue, int colorIdx) {
+      // Color centers: red=0, orange=30, yellow=60, green=120, aqua=180, blue=240, purple=280, magenta=320
+      float centers[8];
+      centers[0] = 0.0;      // red
+      centers[1] = 30.0;     // orange
+      centers[2] = 60.0;     // yellow
+      centers[3] = 120.0;    // green
+      centers[4] = 180.0;    // aqua
+      centers[5] = 240.0;    // blue
+      centers[6] = 280.0;    // purple
+      centers[7] = 320.0;    // magenta
+      
+      float hDeg = hue * 360.0;
+      float center = centers[colorIdx];
+      float width = 30.0; // transition width
+      
+      float dist = abs(hDeg - center);
+      if (dist > 180.0) dist = 360.0 - dist;
+      
+      return smoothstep(width, 0.0, dist);
+    }
+    
+    // ═══════════════════════════════════════════════
+    // Main
+    // ═══════════════════════════════════════════════
     
     void main() {
       vec4 texColor = texture2D(u_image, v_texCoord);
       vec3 color = texColor.rgb;
       
-      // === Exposure ===
+      // ─── Exposure ─────────────────────────────────
       color *= pow(2.0, u_exposure);
       
-      // === Contrast ===
+      // ─── Contrast ─────────────────────────────────
       float contrastFactor = (259.0 * (u_contrast + 255.0)) / (255.0 * (259.0 - u_contrast));
       color = clamp((color - 0.5) * contrastFactor + 0.5, 0.0, 1.0);
       
-      // === Temperature & Tint (approximation) ===
-      color.r += u_temperature * 0.0004;
-      color.b -= u_temperature * 0.0004;
-      color.g += u_tint * 0.0003;
-      color.r -= u_tint * 0.00015;
+      // ─── Temperature & Tint ───────────────────────
+      float tempShift = u_temperature * 0.0004;
+      color.r += tempShift;
+      color.b -= tempShift;
+      float tintShift = u_tint * 0.0003;
+      color.g += tintShift;
+      color.r -= tintShift * 0.5;
       
-      // === Highlights & Shadows ===
+      // ─── Highlights, Shadows, Whites, Blacks ──────
       float lum = luminance(color);
       float highlightMask = smoothstep(0.5, 1.0, lum);
       float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);
-      color += u_highlights * 0.01 * highlightMask;
-      color += u_shadows * 0.01 * shadowMask;
-      
-      // === Whites & Blacks ===
       float whiteMask = smoothstep(0.75, 1.0, lum);
       float blackMask = 1.0 - smoothstep(0.0, 0.25, lum);
+      
+      color += u_highlights * 0.01 * highlightMask;
+      color += u_shadows * 0.01 * shadowMask;
       color += u_whites * 0.01 * whiteMask;
       color += u_blacks * 0.01 * blackMask;
       
-      // === Vibrance (selective saturation boost) ===
-      vec3 hsl = rgb2hsl(color);
+      // ─── Tone Curve (via 1D LUT texture) ──────────
+      if (u_curveEnabled > 0.5) {
+        color.r = texture2D(u_curveLUT, vec2(clamp(color.r, 0.0, 1.0), 0.25)).r;
+        color.g = texture2D(u_curveLUT, vec2(clamp(color.g, 0.0, 1.0), 0.25)).g;
+        color.b = texture2D(u_curveLUT, vec2(clamp(color.b, 0.0, 1.0), 0.25)).b;
+      }
+      
+      // ─── HSL Per-Channel Adjustments ──────────────
+      vec3 hsl = rgb2hsl(clamp(color, 0.0, 1.0));
+      float hueShift = 0.0;
+      float satShift = 0.0;
+      float lumShift = 0.0;
+      
+      for (int i = 0; i < 8; i++) {
+        float w = getColorWeight(hsl.x, i);
+        hueShift += u_hslHue[i] * w;
+        satShift += u_hslSat[i] * w;
+        lumShift += u_hslLum[i] * w;
+      }
+      
+      hsl.x = fract(hsl.x + hueShift / 360.0);
+      hsl.y = clamp(hsl.y + satShift * 0.01, 0.0, 1.0);
+      hsl.z = clamp(hsl.z + lumShift * 0.01, 0.0, 1.0);
+      
+      // ─── Vibrance (selective saturation) ──────────
       float vibranceBoost = u_vibrance * 0.01 * (1.0 - hsl.y);
       hsl.y = clamp(hsl.y + vibranceBoost, 0.0, 1.0);
       
-      // === Saturation ===
+      // ─── Saturation ──────────────────────────────
       hsl.y = clamp(hsl.y * (1.0 + u_saturation * 0.01), 0.0, 1.0);
       color = hsl2rgb(hsl);
       
-      // === Dehaze === 
+      // ─── Color Grading (3-Way) ────────────────────
+      float cgLum = luminance(color);
+      float balance = u_cgBalance * 0.01;
+      float shadowW = smoothstep(0.5 + balance * 0.25, 0.0, cgLum);
+      float highlightW = smoothstep(0.5 - balance * 0.25, 1.0, cgLum);
+      float midtoneW = 1.0 - shadowW - highlightW;
+      midtoneW = max(midtoneW, 0.0);
+      
+      float blend = u_cgBlending * 0.01;
+      
+      // Apply color grading tints
+      if (u_cgShadowsSat > 0.0) {
+        vec3 shadowColor = hsl2rgb(vec3(u_cgShadowsHue / 360.0, 1.0, 0.5));
+        color = mix(color, color * shadowColor * 2.0, shadowW * u_cgShadowsSat * 0.01 * blend);
+      }
+      if (u_cgMidtonesSat > 0.0) {
+        vec3 midColor = hsl2rgb(vec3(u_cgMidtonesHue / 360.0, 1.0, 0.5));
+        color = mix(color, color * midColor * 2.0, midtoneW * u_cgMidtonesSat * 0.01 * blend);
+      }
+      if (u_cgHighlightsSat > 0.0) {
+        vec3 highColor = hsl2rgb(vec3(u_cgHighlightsHue / 360.0, 1.0, 0.5));
+        color = mix(color, color * highColor * 2.0, highlightW * u_cgHighlightsSat * 0.01 * blend);
+      }
+      
+      // ─── Calibration ─────────────────────────────
+      // Shadows tint (green-magenta shift in shadows)
+      float calShadowMask = 1.0 - smoothstep(0.0, 0.5, luminance(color));
+      color.g += u_calShadowsTint * 0.003 * calShadowMask;
+      color.r -= u_calShadowsTint * 0.0015 * calShadowMask;
+      
+      // Primary hue/sat shifts
+      color.r = clamp(color.r * (1.0 + u_calRedSat * 0.005) + u_calRedHue * 0.002, 0.0, 1.5);
+      color.g = clamp(color.g * (1.0 + u_calGreenSat * 0.005) + u_calGreenHue * 0.002, 0.0, 1.5);
+      color.b = clamp(color.b * (1.0 + u_calBlueSat * 0.005) + u_calBlueHue * 0.002, 0.0, 1.5);
+      
+      // ─── Dehaze ──────────────────────────────────
       float dehazeFactor = u_dehaze * 0.005;
       color = color * (1.0 + dehazeFactor) - dehazeFactor * 0.5;
       
-      // === Clarity (local contrast) ===
-      // Simplified: boosts midtone contrast
+      // ─── Clarity (midtone contrast) ───────────────
       float clarityLum = luminance(color);
       float clarityMask = 1.0 - abs(clarityLum - 0.5) * 2.0;
       color += u_clarity * 0.003 * clarityMask * (color - 0.5);
       
-      // === Vignette ===
+      // ─── Texture (fine detail enhancement) ────────
+      // Simplified: subtle edge enhancement
+      float textureLum = luminance(color);
+      color += u_texture * 0.001 * (color - textureLum);
+      
+      // ─── Sharpening (unsharp mask approximation) ──
+      if (u_sharpenAmount > 0.0) {
+        vec3 blur = vec3(0.0);
+        float r2 = u_sharpenRadius;
+        blur += texture2D(u_image, v_texCoord + vec2(-r2, -r2) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2( 0.0, -r2) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2( r2, -r2) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2(-r2,  0.0) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2( r2,  0.0) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2(-r2,  r2) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2( 0.0,  r2) * u_texelSize).rgb;
+        blur += texture2D(u_image, v_texCoord + vec2( r2,  r2) * u_texelSize).rgb;
+        blur /= 8.0;
+        vec3 detail = texColor.rgb - blur;
+        color += detail * u_sharpenAmount * 0.01;
+      }
+      
+      // ─── Vignette ────────────────────────────────
       if (u_vignetteAmount != 0.0) {
         vec2 center = v_texCoord - 0.5;
+        float roundness = u_vignetteRoundness * 0.01;
+        // Adjust aspect for roundness
+        center.x *= mix(1.0, 1.414, 0.5 + roundness * 0.5);
         float dist = length(center) * 1.414;
         float midpt = u_vignetteMidpoint * 0.01;
-        float vignette = smoothstep(midpt, 1.0, dist);
+        float feather = max(u_vignetteFeather * 0.01, 0.01);
+        float vignette = smoothstep(midpt, midpt + feather, dist);
         color *= 1.0 + u_vignetteAmount * 0.01 * vignette * -1.0;
       }
       
-      // === Grain ===
+      // ─── Grain ───────────────────────────────────
       if (u_grainAmount > 0.0) {
-        float grain = (rand(v_texCoord * 1000.0) - 0.5) * u_grainAmount * 0.01;
+        float grainScale = max(1.0, u_grainSize * 0.1);
+        vec2 grainCoord = floor(v_texCoord * 800.0 / grainScale) * grainScale;
+        float grain = (rand(grainCoord) - 0.5) * u_grainAmount * 0.01;
         color += grain;
       }
       
@@ -264,6 +425,86 @@ export class WebGLImageRenderer {
     this.imageWidth = img.width;
     this.imageHeight = img.height;
     this.imageLoaded = true;
+
+    // Initialize curve LUT texture
+    this.initCurveLUT();
+  }
+
+  /** Initialize tone curve LUT (256x1 texture, RGBA for per-channel curves) */
+  private initCurveLUT(): void {
+    const gl = this.gl!;
+    if (this.curveTexture) gl.deleteTexture(this.curveTexture);
+
+    this.curveTexture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.curveTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    // Default identity curve (input = output)
+    const data = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      data[i * 4 + 0] = i; // R
+      data[i * 4 + 1] = i; // G
+      data[i * 4 + 2] = i; // B
+      data[i * 4 + 3] = 255;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  }
+
+  /** Update the tone curve LUT from control points */
+  private updateCurveLUT(points: Array<{ x: number; y: number }>): void {
+    const gl = this.gl!;
+    if (!this.curveTexture) return;
+
+    // Interpolate a smooth curve through the control points
+    const lut = new Uint8Array(256);
+
+    if (!points || points.length < 2) {
+      // Identity
+      for (let i = 0; i < 256; i++) lut[i] = i;
+    } else {
+      // Sort by x
+      const sorted = [...points].sort((a, b) => a.x - b.x);
+
+      for (let i = 0; i < 256; i++) {
+        const x = i / 255;
+        // Find the two points surrounding x
+        let lower = sorted[0];
+        let upper = sorted[sorted.length - 1];
+
+        for (let j = 0; j < sorted.length - 1; j++) {
+          if (x >= sorted[j].x && x <= sorted[j + 1].x) {
+            lower = sorted[j];
+            upper = sorted[j + 1];
+            break;
+          }
+        }
+
+        // Lerp between points
+        const range = upper.x - lower.x;
+        const t = range > 0 ? (x - lower.x) / range : 0;
+        // Smooth step for nicer curves
+        const smooth = t * t * (3 - 2 * t);
+        const y = lower.y + (upper.y - lower.y) * smooth;
+        lut[i] = Math.max(0, Math.min(255, Math.round(y * 255)));
+      }
+    }
+
+    // Write to texture (all channels get the same curve for now)
+    const data = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      data[i * 4 + 0] = lut[i];
+      data[i * 4 + 1] = lut[i];
+      data[i * 4 + 2] = lut[i];
+      data[i * 4 + 3] = 255;
+    }
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.curveTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
   }
 
   /** Render the image with current edit parameters */
@@ -277,7 +518,12 @@ export class WebGLImageRenderer {
 
     gl.useProgram(this.program);
 
-    // Set uniform values from edit parameters
+    // Bind image texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    this.setUniformi('u_image', 0);
+
+    // ─── Basic adjustments ─────────────────────────
     this.setUniform('u_exposure', edits.exposure || 0);
     this.setUniform('u_contrast', (edits.contrast || 0) * 2.55);
     this.setUniform('u_highlights', edits.highlights || 0);
@@ -291,9 +537,69 @@ export class WebGLImageRenderer {
     this.setUniform('u_clarity', edits.clarity || 0);
     this.setUniform('u_dehaze', edits.dehaze || 0);
     this.setUniform('u_texture', edits.texture || 0);
+
+    // ─── Tone Curve LUT ────────────────────────────
+    const curvePoints = edits.toneCurve?.points;
+    const hasCustomCurve = curvePoints && curvePoints.length > 2;
+    if (hasCustomCurve) {
+      this.updateCurveLUT(curvePoints);
+    }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.curveTexture);
+    this.setUniformi('u_curveLUT', 1);
+    this.setUniform('u_curveEnabled', hasCustomCurve ? 1.0 : 0.0);
+
+    // ─── HSL Per-Channel ───────────────────────────
+    const hslColors = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
+    const hslHue = new Float32Array(8);
+    const hslSat = new Float32Array(8);
+    const hslLum = new Float32Array(8);
+    
+    if (edits.hsl) {
+      hslColors.forEach((color, i) => {
+        hslHue[i] = edits.hsl[`${color}Hue`] || 0;
+        hslSat[i] = edits.hsl[`${color}Sat`] || 0;
+        hslLum[i] = edits.hsl[`${color}Lum`] || 0;
+      });
+    }
+    
+    this.setUniformArray('u_hslHue', hslHue);
+    this.setUniformArray('u_hslSat', hslSat);
+    this.setUniformArray('u_hslLum', hslLum);
+
+    // ─── Color Grading ─────────────────────────────
+    const cg = edits.colorGrading || {};
+    this.setUniform('u_cgShadowsHue', cg.shadowsHue || 0);
+    this.setUniform('u_cgShadowsSat', cg.shadowsSat || 0);
+    this.setUniform('u_cgMidtonesHue', cg.midtonesHue || 0);
+    this.setUniform('u_cgMidtonesSat', cg.midtonesSat || 0);
+    this.setUniform('u_cgHighlightsHue', cg.highlightsHue || 0);
+    this.setUniform('u_cgHighlightsSat', cg.highlightsSat || 0);
+    this.setUniform('u_cgBlending', cg.blending ?? 50);
+    this.setUniform('u_cgBalance', cg.balance || 0);
+
+    // ─── Calibration ───────────────────────────────
+    const cal = edits.calibration || {};
+    this.setUniform('u_calShadowsTint', cal.shadowsTint || 0);
+    this.setUniform('u_calRedHue', cal.redPrimary?.hue || 0);
+    this.setUniform('u_calRedSat', cal.redPrimary?.saturation || 0);
+    this.setUniform('u_calGreenHue', cal.greenPrimary?.hue || 0);
+    this.setUniform('u_calGreenSat', cal.greenPrimary?.saturation || 0);
+    this.setUniform('u_calBlueHue', cal.bluePrimary?.hue || 0);
+    this.setUniform('u_calBlueSat', cal.bluePrimary?.saturation || 0);
+
+    // ─── Detail (Sharpening) ───────────────────────
+    this.setUniform('u_sharpenAmount', edits.sharpening?.amount || 0);
+    this.setUniform('u_sharpenRadius', edits.sharpening?.radius || 1.0);
+    this.setUniform2f('u_texelSize', 1.0 / this.imageWidth, 1.0 / this.imageHeight);
+
+    // ─── Effects ───────────────────────────────────
     this.setUniform('u_vignetteAmount', edits.vignette?.amount || 0);
-    this.setUniform('u_vignetteMidpoint', edits.vignette?.midpoint || 50);
+    this.setUniform('u_vignetteMidpoint', edits.vignette?.midpoint ?? 50);
+    this.setUniform('u_vignetteRoundness', edits.vignette?.roundness || 0);
+    this.setUniform('u_vignetteFeather', edits.vignette?.feather ?? 50);
     this.setUniform('u_grainAmount', edits.grain?.amount || 0);
+    this.setUniform('u_grainSize', edits.grain?.size ?? 25);
 
     // Draw
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -309,11 +615,42 @@ export class WebGLImageRenderer {
     }
   }
 
+  /** Set an integer uniform value */
+  private setUniformi(name: string, value: number): void {
+    const gl = this.gl!;
+    if (!this.program) return;
+    const location = gl.getUniformLocation(this.program, name);
+    if (location !== null) {
+      gl.uniform1i(location, value);
+    }
+  }
+
+  /** Set a vec2 uniform */
+  private setUniform2f(name: string, x: number, y: number): void {
+    const gl = this.gl!;
+    if (!this.program) return;
+    const location = gl.getUniformLocation(this.program, name);
+    if (location !== null) {
+      gl.uniform2f(location, x, y);
+    }
+  }
+
+  /** Set a float array uniform */
+  private setUniformArray(name: string, values: Float32Array): void {
+    const gl = this.gl!;
+    if (!this.program) return;
+    const location = gl.getUniformLocation(this.program, name + '[0]');
+    if (location !== null) {
+      gl.uniform1fv(location, values);
+    }
+  }
+
   /** Clean up WebGL resources */
   destroy(): void {
     const gl = this.gl;
     if (!gl) return;
     if (this.texture) gl.deleteTexture(this.texture);
+    if (this.curveTexture) gl.deleteTexture(this.curveTexture);
     if (this.program) gl.deleteProgram(this.program);
   }
 }

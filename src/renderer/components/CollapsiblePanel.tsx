@@ -36,7 +36,7 @@ export const CollapsiblePanel: React.FC<CollapsiblePanelProps> = ({
   }, [children, isOpen]);
 
   return (
-    <div className="border-b border-panel-border">
+    <div className="border-b border-surface-800/50">
       {/* Header */}
       <button
         className="panel-header w-full"
@@ -45,11 +45,11 @@ export const CollapsiblePanel: React.FC<CollapsiblePanelProps> = ({
         <div className="flex items-center gap-2">
           {/* Collapse arrow */}
           <svg
-            className={`w-3 h-3 text-surface-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
+            className={`w-2.5 h-2.5 text-surface-500 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
-            strokeWidth={2}
+            strokeWidth={2.5}
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
           </svg>
@@ -58,7 +58,7 @@ export const CollapsiblePanel: React.FC<CollapsiblePanelProps> = ({
 
           {/* Modified indicator */}
           {isModified && (
-            <div className="w-1.5 h-1.5 rounded-full bg-lumora-500" />
+            <div className="w-1.5 h-1.5 rounded-full bg-lumora-500 shadow-sm shadow-lumora-500/30" />
           )}
         </div>
 

@@ -14,6 +14,7 @@ import { EditSlider } from '../components/EditSlider';
 import { useEditStore, DEFAULT_EDITS } from '../stores/editStore';
 import { useAppStore } from '../stores/appStore';
 import { ToneCurveEditor } from '../components/ToneCurveEditor';
+import { MaskPanel } from '../components/MaskPanel';
 
 /** White balance presets */
 const WB_PRESETS = [
@@ -65,6 +66,9 @@ export const RightPanel: React.FC = () => {
   // Develop mode — show all edit panels
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
+      {/* ═══════════════════ MASKING ═══════════════════ */}
+      <MaskPanel />
+
       {/* ═══════════════════ BASIC ═══════════════════ */}
       <CollapsiblePanel title="Basic" defaultOpen={true} isModified={isBasicModified}>
         {/* White Balance Preset */}

@@ -104,6 +104,63 @@ const App: React.FC<AppProps> = ({ onReady }) => {
         e.preventDefault();
         useAppStore.getState().toggleLeftPanel();
         useAppStore.getState().toggleRightPanel();
+      } else if (e.key === 'f') {
+        // Toggle filmstrip
+        useAppStore.getState().toggleFilmstrip();
+      } else if (e.key >= '0' && e.key <= '5' && !cmd) {
+        // Rate selected image 0-5
+        const rating = parseInt(e.key);
+        const state = useAppStore.getState();
+        if (state.activeImageId) {
+          state.updateImage(state.activeImageId, { rating } as any);
+          window.electronAPI?.catalogUpdate(state.activeImageId, { rating });
+        }
+      } else if (e.key === 'p' && !cmd) {
+        // Pick flag
+        const state = useAppStore.getState();
+        if (state.activeImageId) {
+          const img = state.images.find(i => i.id === state.activeImageId);
+          const newFlag = img?.flag === 'pick' ? '' : 'pick';
+          state.updateImage(state.activeImageId, { flag: newFlag } as any);
+          window.electronAPI?.catalogUpdate(state.activeImageId, { flag: newFlag });
+        }
+      } else if (e.key === 'x' && !cmd) {
+        // Reject flag
+        const state = useAppStore.getState();
+        if (state.activeImageId) {
+          const img = state.images.find(i => i.id === state.activeImageId);
+          const newFlag = img?.flag === 'reject' ? '' : 'reject';
+          state.updateImage(state.activeImageId, { flag: newFlag } as any);
+          window.electronAPI?.catalogUpdate(state.activeImageId, { flag: newFlag });
+        }
+      } else if (e.key === 'u' && !cmd) {
+        // Clear flag
+        const state = useAppStore.getState();
+        if (state.activeImageId) {
+          state.updateImage(state.activeImageId, { flag: '' } as any);
+          window.electronAPI?.catalogUpdate(state.activeImageId, { flag: '' });
+        }
+      } else if (cmd && e.key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          useEditStore.getState().redo();
+        } else {
+          useEditStore.getState().undo();
+        }
+      } else if (e.key === 'ArrowRight' && !cmd) {
+        // Next image
+        const state = useAppStore.getState();
+        const idx = state.images.findIndex(i => i.id === state.activeImageId);
+        if (idx >= 0 && idx < state.images.length - 1) {
+          state.setActiveImageId(state.images[idx + 1].id);
+        }
+      } else if (e.key === 'ArrowLeft' && !cmd) {
+        // Previous image
+        const state = useAppStore.getState();
+        const idx = state.images.findIndex(i => i.id === state.activeImageId);
+        if (idx > 0) {
+          state.setActiveImageId(state.images[idx - 1].id);
+        }
       }
     };
 
@@ -128,7 +185,7 @@ const App: React.FC<AppProps> = ({ onReady }) => {
         {/* Left Panel */}
         {leftPanelVisible && (
           <div
-            className="flex-shrink-0 bg-panel-bg border-r border-panel-border overflow-y-auto scrollbar-thin"
+            className="flex-shrink-0 bg-surface-900/70 backdrop-blur-sm border-r border-surface-800/50 overflow-y-auto scrollbar-thin"
             style={{ width: leftPanelWidth }}
           >
             <LeftPanel />
@@ -148,7 +205,7 @@ const App: React.FC<AppProps> = ({ onReady }) => {
         {/* Right Panel */}
         {rightPanelVisible && (
           <div
-            className="flex-shrink-0 bg-panel-bg border-l border-panel-border overflow-y-auto scrollbar-thin"
+            className="flex-shrink-0 bg-surface-900/70 backdrop-blur-sm border-l border-surface-800/50 overflow-y-auto scrollbar-thin"
             style={{ width: rightPanelWidth }}
           >
             <RightPanel />

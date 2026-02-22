@@ -5,17 +5,31 @@
  * of the Develop module for quick image navigation.
  */
 
-import React from 'react';
+import React, { useRef, useCallback } from 'react';
 import { useAppStore } from '../stores/appStore';
 
 export const Filmstrip: React.FC = () => {
   const { images, activeImageId, setActiveImageId, selectedImageIds } = useAppStore();
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollLeft += e.deltaY;
+    }
+  }, []);
 
   if (images.length === 0) return null;
 
   return (
-    <div className="h-20 bg-surface-900 border-t border-panel-border flex items-center px-2 overflow-x-auto scrollbar-thin">
-      <div className="flex items-center gap-1.5">
+    <div className="h-20 bg-surface-900/95 backdrop-blur-xl border-t border-surface-800/60 flex items-center px-2 relative">
+      {/* Top gradient line */}
+      <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-surface-700/20 to-transparent" />
+
+      <div
+        ref={scrollRef}
+        className="flex items-center gap-1 overflow-x-auto scrollbar-thin py-1"
+        onWheel={handleWheel}
+      >
         {images.map((image) => {
           const isActive = image.id === activeImageId;
           const isSelected = selectedImageIds.includes(image.id);
@@ -27,7 +41,7 @@ export const Filmstrip: React.FC = () => {
           return (
             <div
               key={image.id}
-              className={`filmstrip-thumb ${isActive ? 'selected' : ''}`}
+              className={`filmstrip-thumb group ${isActive ? 'selected' : ''}`}
               onClick={() => setActiveImageId(image.id)}
             >
               <img
@@ -39,22 +53,33 @@ export const Filmstrip: React.FC = () => {
                   (e.target as HTMLImageElement).src = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><rect fill="#282828" width="60" height="60"/><text x="30" y="33" text-anchor="middle" fill="#555" font-size="8">${image.file_type?.toUpperCase() || 'IMG'}</text></svg>`)}`;
                 }}
               />
+
+              {/* Hover overlay */}
+              <div className={`absolute inset-0 transition-colors ${isActive ? '' : 'group-hover:bg-white/5'}`} />
+
               {/* Rating dots */}
               {image.rating > 0 && (
-                <div className="absolute bottom-0.5 left-0 right-0 flex justify-center gap-0.5">
+                <div className="absolute bottom-1 left-0 right-0 flex justify-center gap-0.5">
                   {Array.from({ length: image.rating }, (_, i) => (
-                    <div key={i} className="w-1 h-1 rounded-full bg-yellow-400" />
+                    <div key={i} className="w-1 h-1 rounded-full bg-yellow-400 shadow-sm" />
                   ))}
                 </div>
               )}
+
               {/* Color label stripe */}
               {image.color_label && image.color_label !== 'none' && (
                 <div className={`absolute bottom-0 left-0 right-0 h-0.5 ${
                   image.color_label === 'red' ? 'bg-red-500' :
                   image.color_label === 'yellow' ? 'bg-yellow-500' :
                   image.color_label === 'green' ? 'bg-green-500' :
-                  image.color_label === 'blue' ? 'bg-blue-500' : ''
+                  image.color_label === 'blue' ? 'bg-blue-500' :
+                  image.color_label === 'purple' ? 'bg-purple-500' : ''
                 }`} />
+              )}
+
+              {/* Active indicator */}
+              {isActive && (
+                <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-lumora-400" />
               )}
             </div>
           );

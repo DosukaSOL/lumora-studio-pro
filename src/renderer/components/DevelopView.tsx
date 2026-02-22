@@ -139,12 +139,12 @@ export const DevelopView: React.FC = () => {
   if (!activeImage) {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-950">
-        <div className="text-center">
-          <svg className="w-16 h-16 mx-auto mb-4 text-surface-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+        <div className="text-center animate-fade-in">
+          <svg className="w-20 h-20 mx-auto mb-5 text-surface-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={0.7}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
-          <p className="text-sm text-surface-500">Select a photo to edit</p>
-          <p className="text-xs text-surface-600 mt-1">Double-click a photo in the Library to open it here</p>
+          <p className="text-sm text-surface-400 font-light">Select a photo to edit</p>
+          <p className="text-xs text-surface-600 mt-2">Double-click a photo in the Library to open it here</p>
         </div>
       </div>
     );
@@ -153,13 +153,19 @@ export const DevelopView: React.FC = () => {
   return (
     <div
       ref={containerRef}
-      className="flex-1 relative bg-surface-950 overflow-hidden cursor-crosshair"
+      className="flex-1 relative bg-surface-950 overflow-hidden"
+      style={{ cursor: dragStart ? 'grabbing' : (zoomLevel > 1 ? 'grab' : 'crosshair') }}
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
+      {/* Subtle vignette overlay for depth */}
+      <div className="absolute inset-0 pointer-events-none" style={{
+        background: 'radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.15) 100%)'
+      }} />
+
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
@@ -168,30 +174,45 @@ export const DevelopView: React.FC = () => {
       {/* Before/After split view overlay */}
       {showBeforeAfter && imageLoaded && (
         <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute left-1/2 top-0 bottom-0 w-px bg-white/50" />
-          <div className="absolute left-1/2 top-3 -translate-x-full px-2 py-0.5 bg-black/60 rounded text-2xs text-white">
-            BEFORE
+          <div className="absolute left-1/2 top-0 bottom-0 w-px bg-white/40" />
+          <div className="absolute left-1/2 top-4 -translate-x-[calc(100%+8px)]">
+            <span className="px-2 py-0.5 bg-black/70 backdrop-blur-sm rounded text-2xs text-white/80 font-medium tracking-wide">
+              BEFORE
+            </span>
           </div>
-          <div className="absolute left-1/2 top-3 px-2 py-0.5 bg-black/60 rounded text-2xs text-white">
-            AFTER
+          <div className="absolute left-1/2 top-4 translate-x-2">
+            <span className="px-2 py-0.5 bg-black/70 backdrop-blur-sm rounded text-2xs text-white/80 font-medium tracking-wide">
+              AFTER
+            </span>
           </div>
         </div>
       )}
 
       {/* Loading indicator */}
       {!imageLoaded && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="w-8 h-8 border-2 border-lumora-500/30 border-t-lumora-500 rounded-full animate-spin" />
+        <div className="absolute inset-0 flex items-center justify-center bg-surface-950">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-8 h-8 border-2 border-lumora-500/20 border-t-lumora-500 rounded-full animate-spin" />
+            <span className="text-2xs text-surface-500">Loading image...</span>
+          </div>
         </div>
       )}
 
-      {/* Image info overlay */}
-      <div className="absolute bottom-3 left-3 flex items-center gap-3 text-2xs text-surface-400">
-        <span>{activeImage.file_name}</span>
-        {activeImage.width && activeImage.height && (
-          <span>{activeImage.width} × {activeImage.height}</span>
-        )}
-        <span>{Math.round(zoomLevel * 100)}%</span>
+      {/* Bottom info bar */}
+      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-black/50 to-transparent pointer-events-none">
+        <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between text-2xs">
+          <div className="flex items-center gap-3 text-white/50">
+            <span className="font-medium">{activeImage.file_name}</span>
+            {activeImage.width && activeImage.height && (
+              <span>{activeImage.width} × {activeImage.height}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-white/50">
+            <span className="bg-black/40 backdrop-blur-sm px-1.5 py-0.5 rounded text-2xs font-medium">
+              {Math.round(zoomLevel * 100)}%
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

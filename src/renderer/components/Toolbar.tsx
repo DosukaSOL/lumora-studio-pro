@@ -2,11 +2,14 @@
  * Lumora Studio Pro — Toolbar
  * 
  * Secondary toolbar with Import/Export buttons, view controls,
- * and editing tools (crop, masking, etc.)
+ * auto-enhance toggle, and editing tools (crop, masking, etc.)
  */
 
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import { useAppStore } from '../stores/appStore';
+import { useEditStore } from '../stores/editStore';
+import { useMaskStore } from '../stores/maskStore';
+import { autoEnhanceFromImage } from '../utils/autoEnhance';
 
 interface ToolbarProps {
   onImport: () => void;
@@ -28,12 +31,79 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
     setZoomLevel,
     libraryViewMode,
     setLibraryViewMode,
+    activeImageId,
+    images,
   } = useAppStore();
 
+  const { edits, applyPreset, pushHistory } = useEditStore();
+  const { addMask, activeTool, setActiveTool } = useMaskStore();
+  const [autoEnhanceActive, setAutoEnhanceActive] = useState(false);
+  const [isEnhancing, setIsEnhancing] = useState(false);
+
+  const activeImage = images.find((img) => img.id === activeImageId);
+
+  // Auto-enhance handler
+  const handleAutoEnhance = useCallback(async () => {
+    if (!activeImage) return;
+    setIsEnhancing(true);
+
+    try {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+        img.src = activeImage.file_path
+          ? `file://${activeImage.file_path}`
+          : activeImage.preview_path
+          ? `file://${activeImage.preview_path}`
+          : '';
+      });
+
+      const enhancements = autoEnhanceFromImage(img);
+      
+      if (!autoEnhanceActive) {
+        pushHistory('Auto Enhance');
+        applyPreset(enhancements);
+        setAutoEnhanceActive(true);
+      } else {
+        // Toggle off - undo by resetting to pre-enhance state
+        useEditStore.getState().undo();
+        setAutoEnhanceActive(false);
+      }
+    } catch (err) {
+      console.error('Auto-enhance failed:', err);
+      // Fallback to sensible defaults
+      if (!autoEnhanceActive) {
+        pushHistory('Auto Enhance (Default)');
+        applyPreset({
+          exposure: 0.15, contrast: 12, highlights: -20, shadows: 25,
+          whites: 10, blacks: -8, vibrance: 15, clarity: 8,
+        });
+        setAutoEnhanceActive(true);
+      } else {
+        useEditStore.getState().undo();
+        setAutoEnhanceActive(false);
+      }
+    }
+
+    setIsEnhancing(false);
+  }, [activeImage, autoEnhanceActive, pushHistory, applyPreset]);
+
+  // Mask tool handlers
+  const handleMaskTool = useCallback((type: 'brush' | 'linearGradient' | 'radialGradient') => {
+    if (activeTool === type) {
+      setActiveTool(null);
+    } else {
+      addMask(type);
+    }
+  }, [activeTool, addMask, setActiveTool]);
+
   return (
-    <div className="h-10 bg-surface-900/80 backdrop-blur flex items-center justify-between px-3 border-b border-panel-border no-drag">
+    <div className="h-10 bg-surface-900/80 backdrop-blur-xl flex items-center justify-between px-3 border-b border-panel-border/50 no-drag">
       {/* Left side — Import + panel toggles */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5">
         <button
           onClick={onImport}
           className="btn-primary flex items-center gap-1.5"
@@ -44,7 +114,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
           Import
         </button>
 
-        <div className="w-px h-5 bg-panel-border mx-1" />
+        <div className="w-px h-5 bg-panel-border/50 mx-1" />
 
         <button
           onClick={toggleLeftPanel}
@@ -80,13 +150,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
       </div>
 
       {/* Center — View/Edit tools */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5">
         {currentModule === 'library' && (
           <>
             <button
               onClick={() => setLibraryViewMode('grid')}
               className={`toolbar-btn ${libraryViewMode === 'grid' ? 'active' : ''}`}
-              title="Grid View"
+              title="Grid View (G)"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm11 0h7v7h-7v-7z" />
@@ -106,6 +176,22 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
 
         {currentModule === 'develop' && (
           <>
+            {/* Auto Enhance */}
+            <button
+              onClick={handleAutoEnhance}
+              className={`toolbar-btn relative group ${autoEnhanceActive ? 'active' : ''} ${isEnhancing ? 'animate-pulse' : ''}`}
+              title="Auto Enhance (A)"
+              disabled={!activeImage || isEnhancing}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+              </svg>
+              <span className="ml-1 text-2xs hidden sm:inline">Auto</span>
+            </button>
+
+            <div className="w-px h-5 bg-panel-border/50 mx-0.5" />
+
             <button
               onClick={toggleBeforeAfter}
               className={`toolbar-btn ${showBeforeAfter ? 'active' : ''}`}
@@ -116,6 +202,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
               </svg>
               <span className="ml-1 text-2xs">Y|Y</span>
             </button>
+
+            <div className="w-px h-5 bg-panel-border/50 mx-0.5" />
 
             {/* Crop tool */}
             <button className="toolbar-btn" title="Crop (R)">
@@ -132,15 +220,25 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
               </svg>
             </button>
 
+            <div className="w-px h-5 bg-panel-border/50 mx-0.5" />
+
             {/* Brush mask */}
-            <button className="toolbar-btn" title="Brush Mask (K)">
+            <button
+              className={`toolbar-btn ${activeTool === 'brush' ? 'active' : ''}`}
+              title="Brush Mask (K)"
+              onClick={() => handleMaskTool('brush')}
+            >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
               </svg>
             </button>
 
             {/* Linear gradient */}
-            <button className="toolbar-btn" title="Linear Gradient (M)">
+            <button
+              className={`toolbar-btn ${activeTool === 'linearGradient' ? 'active' : ''}`}
+              title="Linear Gradient (M)"
+              onClick={() => handleMaskTool('linearGradient')}
+            >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <rect x="3" y="3" width="18" height="18" rx="1" />
                 <line x1="3" y1="12" x2="21" y2="12" />
@@ -148,7 +246,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
             </button>
 
             {/* Radial gradient */}
-            <button className="toolbar-btn" title="Radial Gradient (Shift+M)">
+            <button
+              className={`toolbar-btn ${activeTool === 'radialGradient' ? 'active' : ''}`}
+              title="Radial Gradient (Shift+M)"
+              onClick={() => handleMaskTool('radialGradient')}
+            >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <circle cx="12" cy="12" r="9" />
                 <circle cx="12" cy="12" r="4" />
@@ -158,24 +260,24 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
         )}
 
         {/* Zoom controls */}
-        <div className="w-px h-5 bg-panel-border mx-1" />
+        <div className="w-px h-5 bg-panel-border/50 mx-1" />
         <div className="flex items-center gap-1">
           <button
             onClick={() => setZoomLevel(zoomLevel - 0.25)}
             className="toolbar-btn"
-            title="Zoom Out"
+            title="Zoom Out (-)"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
             </svg>
           </button>
-          <span className="text-2xs text-surface-400 w-10 text-center">
+          <span className="text-2xs text-surface-400 w-10 text-center tabular-nums">
             {Math.round(zoomLevel * 100)}%
           </span>
           <button
             onClick={() => setZoomLevel(zoomLevel + 0.25)}
             className="toolbar-btn"
-            title="Zoom In"
+            title="Zoom In (+)"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
@@ -184,7 +286,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ onImport, onExport }) => {
           <button
             onClick={() => setZoomLevel(1)}
             className="toolbar-btn"
-            title="Fit to View"
+            title="Fit to View (0)"
           >
             <span className="text-2xs">FIT</span>
           </button>

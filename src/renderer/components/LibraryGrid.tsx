@@ -137,23 +137,28 @@ export const LibraryGrid: React.FC = () => {
   if (images.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-950">
-        <div className="text-center max-w-md">
+        <div className="text-center max-w-md animate-fade-in">
           {/* Logo */}
-          <svg className="w-20 h-20 mx-auto mb-6" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <linearGradient id="emptyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" style={{ stopColor: '#38a3f8' }} />
-                <stop offset="100%" style={{ stopColor: '#026bc7' }} />
-              </linearGradient>
-            </defs>
-            <circle cx="50" cy="50" r="45" stroke="url(#emptyGrad)" strokeWidth="1.5" fill="none" opacity="0.2"/>
-            <path d="M35 62V38l15 12 15-12v24" stroke="url(#emptyGrad)" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" opacity="0.4"/>
-          </svg>
+          <div className="relative w-24 h-24 mx-auto mb-8">
+            <svg className="w-24 h-24" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="emptyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style={{ stopColor: '#38a3f8' }} />
+                  <stop offset="100%" style={{ stopColor: '#026bc7' }} />
+                </linearGradient>
+              </defs>
+              <circle cx="50" cy="50" r="45" stroke="url(#emptyGrad)" strokeWidth="1" fill="none" opacity="0.15"/>
+              <circle cx="50" cy="50" r="30" stroke="url(#emptyGrad)" strokeWidth="1" fill="none" opacity="0.1"/>
+              <path d="M35 62V38l15 12 15-12v24" stroke="url(#emptyGrad)" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" opacity="0.35"/>
+            </svg>
+            <div className="absolute inset-0 animate-pulse rounded-full" 
+                 style={{ background: 'radial-gradient(circle, rgba(14,135,233,0.06) 0%, transparent 70%)' }} />
+          </div>
 
-          <h2 className="text-xl font-light text-surface-300 mb-2">Welcome to Lumora Studio Pro</h2>
-          <p className="text-sm text-surface-500 mb-6 leading-relaxed">
+          <h2 className="text-xl font-light text-surface-200 mb-3">Welcome to Lumora Studio Pro</h2>
+          <p className="text-sm text-surface-500 mb-8 leading-relaxed max-w-sm mx-auto">
             Import your photos to get started. Supports RAW formats (CR2, CR3, NEF, ARW, DNG), 
-            JPEG, PNG, and TIFF files.
+            JPEG, PNG, TIFF, and more.
           </p>
           <button
             onClick={async () => {
@@ -165,10 +170,22 @@ export const LibraryGrid: React.FC = () => {
                 useAppStore.getState().setImages(allImages);
               }
             }}
-            className="btn-primary px-6 py-2 text-sm"
+            className="btn-primary px-8 py-2.5 text-sm rounded-lg shadow-lg shadow-lumora-600/20 hover:shadow-lumora-600/30 transition-all"
           >
             Import Photos
           </button>
+
+          <div className="mt-6 flex items-center justify-center gap-6 text-2xs text-surface-600">
+            <span className="flex items-center gap-1">
+              <kbd className="px-1 py-0.5 bg-surface-800 rounded text-surface-500 text-2xs">⌘I</kbd> Import
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="px-1 py-0.5 bg-surface-800 rounded text-surface-500 text-2xs">G</kbd> Library
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="px-1 py-0.5 bg-surface-800 rounded text-surface-500 text-2xs">D</kbd> Develop
+            </span>
+          </div>
         </div>
       </div>
     );

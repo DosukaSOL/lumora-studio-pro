@@ -222,7 +222,29 @@ export function setupIpcHandlers(db: CatalogDatabase): void {
   });
 
   ipcMain.handle('catalog:getAll', async (_event, options) => {
-    return db.getAllImages(options);
+    const allImages = db.getAllImages(options);
+    
+    // Validate that image files still exist on disk
+    // Removes entries for files on disconnected drives or deleted files
+    const valid: any[] = [];
+    const missingIds: string[] = [];
+    
+    for (const img of allImages) {
+      try {
+        await fs.access(img.file_path);
+        valid.push(img);
+      } catch {
+        missingIds.push(img.id);
+      }
+    }
+    
+    // Clean up missing entries from the database
+    if (missingIds.length > 0) {
+      console.log(`[Catalog] Removing ${missingIds.length} entries with missing files`);
+      db.deleteImages(missingIds);
+    }
+    
+    return valid;
   });
 
   ipcMain.handle('catalog:getById', async (_event, id: string) => {

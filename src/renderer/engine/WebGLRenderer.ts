@@ -157,21 +157,22 @@ export class WebGLImageRenderer {
     // ═══════════════════════════════════════════════
     // Determine HSL color index weight (0-7)
     // Maps hue angle to 8 color bands with soft transitions
+    // NOTE: Uses if-else chain instead of array indexing because
+    // GLSL ES 1.0 forbids non-constant array indices (ANGLE enforces this)
     // ═══════════════════════════════════════════════
     float getColorWeight(float hue, int colorIdx) {
       // Color centers: red=0, orange=30, yellow=60, green=120, aqua=180, blue=240, purple=280, magenta=320
-      float centers[8];
-      centers[0] = 0.0;      // red
-      centers[1] = 30.0;     // orange
-      centers[2] = 60.0;     // yellow
-      centers[3] = 120.0;    // green
-      centers[4] = 180.0;    // aqua
-      centers[5] = 240.0;    // blue
-      centers[6] = 280.0;    // purple
-      centers[7] = 320.0;    // magenta
+      float center;
+      if (colorIdx == 0) center = 0.0;        // red
+      else if (colorIdx == 1) center = 30.0;   // orange
+      else if (colorIdx == 2) center = 60.0;   // yellow
+      else if (colorIdx == 3) center = 120.0;  // green
+      else if (colorIdx == 4) center = 180.0;  // aqua
+      else if (colorIdx == 5) center = 240.0;  // blue
+      else if (colorIdx == 6) center = 280.0;  // purple
+      else center = 320.0;                     // magenta
       
       float hDeg = hue * 360.0;
-      float center = centers[colorIdx];
       float width = 30.0; // transition width
       
       float dist = abs(hDeg - center);
@@ -341,6 +342,74 @@ export class WebGLImageRenderer {
     }
   `;
 
+  /** Fallback fragment shader — basic adjustments only, guaranteed GLSL ES 1.0 compat */
+  private static FALLBACK_FRAGMENT_SHADER = `
+    precision mediump float;
+    varying vec2 v_texCoord;
+    uniform sampler2D u_image;
+    
+    uniform float u_exposure;
+    uniform float u_contrast;
+    uniform float u_highlights;
+    uniform float u_shadows;
+    uniform float u_whites;
+    uniform float u_blacks;
+    uniform float u_temperature;
+    uniform float u_tint;
+    uniform float u_vibrance;
+    uniform float u_saturation;
+    uniform float u_clarity;
+    uniform float u_dehaze;
+    
+    float luminance(vec3 c) {
+      return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    }
+    
+    void main() {
+      vec4 texColor = texture2D(u_image, v_texCoord);
+      vec3 color = texColor.rgb;
+      
+      // Exposure
+      color *= pow(2.0, u_exposure);
+      
+      // Contrast
+      float cf = (259.0 * (u_contrast + 255.0)) / (255.0 * (259.0 - u_contrast));
+      color = clamp((color - 0.5) * cf + 0.5, 0.0, 1.0);
+      
+      // Temperature & Tint
+      color.r += u_temperature * 0.0004;
+      color.b -= u_temperature * 0.0004;
+      color.g += u_tint * 0.0003;
+      color.r -= u_tint * 0.00015;
+      
+      // Highlights, Shadows, Whites, Blacks
+      float lum = luminance(color);
+      color += u_highlights * 0.01 * smoothstep(0.5, 1.0, lum);
+      color += u_shadows * 0.01 * (1.0 - smoothstep(0.0, 0.5, lum));
+      color += u_whites * 0.01 * smoothstep(0.75, 1.0, lum);
+      color += u_blacks * 0.01 * (1.0 - smoothstep(0.0, 0.25, lum));
+      
+      // Saturation (simple)
+      float grey = luminance(color);
+      color = mix(vec3(grey), color, 1.0 + u_saturation * 0.01);
+      
+      // Vibrance (selective saturation)
+      float sat = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
+      float vibFactor = u_vibrance * 0.01 * (1.0 - sat);
+      color = mix(vec3(grey), color, 1.0 + vibFactor);
+      
+      // Dehaze
+      color = color * (1.0 + u_dehaze * 0.005) - u_dehaze * 0.005 * 0.5;
+      
+      // Clarity (midtone contrast)
+      float clarityMask = 1.0 - abs(lum - 0.5) * 2.0;
+      color += u_clarity * 0.003 * clarityMask * (color - 0.5);
+      
+      color = clamp(color, 0.0, 1.0);
+      gl_FragColor = vec4(color, texColor.a);
+    }
+  `;
+
   /** Fragment shader — blends two renders via a mask alpha texture */
   private static BLEND_FRAGMENT_SHADER = `
     precision highp float;
@@ -366,6 +435,9 @@ export class WebGLImageRenderer {
     }
   `;
 
+  /** Whether we're using the simplified fallback shader */
+  private usingFallbackShader: boolean = false;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true }) || canvas.getContext('webgl', { preserveDrawingBuffer: true });
@@ -378,31 +450,62 @@ export class WebGLImageRenderer {
     this.initGeometry();
   }
 
-  /** Compile and link shaders */
+  /** Compile and link shaders — tries full shader first, then fallback */
   private initShaders(): void {
     const gl = this.gl!;
 
     const vertexShader = this.compileShader(gl.VERTEX_SHADER, WebGLImageRenderer.VERTEX_SHADER);
-    const fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.FRAGMENT_SHADER);
-
-    if (!vertexShader || !fragmentShader) {
-      console.error('[WebGL] Shader compilation FAILED — renderer will not produce output');
+    if (!vertexShader) {
+      console.error('[WebGL] Vertex shader compilation FAILED — renderer will not produce output');
       return;
     }
 
-    this.program = gl.createProgram()!;
-    gl.attachShader(this.program, vertexShader);
-    gl.attachShader(this.program, fragmentShader);
-    gl.linkProgram(this.program);
+    // Try full-featured fragment shader first
+    let fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.FRAGMENT_SHADER);
 
-    if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
-      console.error('[WebGL] Shader link error:', gl.getProgramInfoLog(this.program));
+    if (fragmentShader) {
+      const prog = gl.createProgram()!;
+      gl.attachShader(prog, vertexShader);
+      gl.attachShader(prog, fragmentShader);
+      gl.linkProgram(prog);
+
+      if (gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        this.program = prog;
+        gl.useProgram(this.program);
+        this.usingFallbackShader = false;
+        console.log('[WebGL] Full shaders compiled and linked successfully');
+        return;
+      }
+      console.warn('[WebGL] Full shader link error:', gl.getProgramInfoLog(prog));
+      gl.deleteProgram(prog);
+    } else {
+      console.warn('[WebGL] Full fragment shader failed, trying fallback...');
+    }
+
+    // Try fallback shader
+    const vertexShader2 = this.compileShader(gl.VERTEX_SHADER, WebGLImageRenderer.VERTEX_SHADER);
+    fragmentShader = this.compileShader(gl.FRAGMENT_SHADER, WebGLImageRenderer.FALLBACK_FRAGMENT_SHADER);
+
+    if (!vertexShader2 || !fragmentShader) {
+      console.error('[WebGL] Fallback shader compilation also FAILED — no rendering possible');
+      return;
+    }
+
+    const prog = gl.createProgram()!;
+    gl.attachShader(prog, vertexShader2);
+    gl.attachShader(prog, fragmentShader);
+    gl.linkProgram(prog);
+
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error('[WebGL] Fallback shader link error:', gl.getProgramInfoLog(prog));
       this.program = null;
       return;
     }
 
+    this.program = prog;
     gl.useProgram(this.program);
-    console.log('[WebGL] Shaders compiled and linked successfully');
+    this.usingFallbackShader = true;
+    console.log('[WebGL] Using FALLBACK shader (basic adjustments only)');
   }
 
   /** Compile a single shader */

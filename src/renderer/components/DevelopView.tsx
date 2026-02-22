@@ -12,7 +12,7 @@
  *  - All edit adjustments applied in real-time via GPU shaders
  */
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useEditStore } from '../stores/editStore';
 import { useMaskStore } from '../stores/maskStore';
@@ -457,6 +457,20 @@ export const DevelopView: React.FC = () => {
     return 'default';
   };
 
+  // CSS filter fallback: when WebGL isn't rendering, apply basic edits via CSS
+  const cssFilter = useMemo(() => {
+    const filters: string[] = [];
+    const exp = edits.exposure || 0;
+    const con = edits.contrast || 0;
+    const sat = edits.saturation || 0;
+
+    if (exp !== 0) filters.push(`brightness(${Math.pow(2, exp).toFixed(3)})`);
+    if (con !== 0) filters.push(`contrast(${(1 + con / 100).toFixed(3)})`);
+    if (sat !== 0) filters.push(`saturate(${(1 + sat / 100).toFixed(3)})`);
+
+    return filters.length > 0 ? filters.join(' ') : 'none';
+  }, [edits.exposure, edits.contrast, edits.saturation]);
+
   if (!activeImage) {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-950">
@@ -504,7 +518,7 @@ export const DevelopView: React.FC = () => {
           src={imageDataUri}
           alt=""
           className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-          style={{ zIndex: 0 }}
+          style={{ zIndex: 0, filter: cssFilter }}
           draggable={false}
         />
       )}
